@@ -19,6 +19,8 @@ import ".." / lib / symparser
 const
   ParamSymName = "`dest.0" # unspellable: the program is re-checked from
                            # idents beside the user's declarations
+  WriteNifAlias = "`writenif" # unspellable alias of `std/writenif`; the
+                              # program calls its routines through it
 
 when false:
   proc addSubtreeAndSyms(result: var TokenBuf; c: Cursor; stack: var seq[SymId]) =
@@ -129,9 +131,14 @@ proc emitSymAsIdent(buf: var TokenBuf; sym: SymId; info: NifLineInfo;
   ## `std/writenif`'s symbols are the program's own calls into its reporting
   ## routines, plain non-generic procs: they become idents without a look at
   ## their declarations, as the program's build is what builds that module
-  ## (it is an import, see `semos.runEval`) and it may not exist yet.
+  ## (it is an import, see `semos.runEval`) and it may not exist yet. They
+  ## are qualified with the module's unspellable alias, so a routine of the
+  ## user's with the same name cannot take the call.
   if pool.symModule(sym) == writeNifModuleSuffix:
+    buf.addParLe(DotX, info)
+    buf.addIdent(WriteNifAlias, info)
     buf.addIdent(pool.strings.getOrIncl(pool.symBasename(sym)), info)
+    buf.addParRi()
     return
   let typevars = instantiationTypevars(sym)
   if not cursorIsNil(typevars):
@@ -478,6 +485,11 @@ proc unravelArray(c: var SynthesizeSerializerCtx;
       incIndexVar c, indexVar
   genParRiCall c
 
+proc addSystemRoutine(dest: var TokenBuf; name: string; info: NifLineInfo) =
+  copyIntoKind dest, DotX, info:
+    dest.addIdent "system", info
+    dest.addIdent name, info
+
 proc unravelPtrUarrayField(c: var SynthesizeSerializerCtx;
                             fieldType: Cursor; param: TokenBuf) =
   ## ptr-to-nif for a `ptr UncheckedArray[T]` field. Emits runtime code
@@ -503,21 +515,21 @@ proc unravelPtrUarrayField(c: var SynthesizeSerializerCtx;
   genTypeCall(c, uarrayType)
 
   copyIntoKind c.dest, WhileS, c.info:
-    # while idx < len(param):
+    # while idx < system.len(param):
     copyIntoKind c.dest, LtX, c.info:
       addIntType c
       copyIntoSymUse c.dest, indexVar, c.info
       copyIntoKind c.dest, CallS, c.info:
-        c.dest.addIdent "len", c.info
+        addSystemRoutine c.dest, "len", c.info
         c.dest.add param
     copyIntoKind c.dest, StmtsS, c.info:
-      # entryPoint(baseType, param[idx]) — emitted as `(call [] param idx)`
-      # so the sub-compile resolves it against the user-defined `[]`
-      # overload. Using `(arrat …)` would only work for raw arrays, not
-      # for objects (seq, string, …) that route subscript through `[]`.
+      # entryPoint(baseType, system.`[]`(param, idx)). Using `(arrat …)`
+      # would only work for raw arrays, not for `seq`, which routes
+      # subscript through `[]`. Qualified, so that a `len` or `[]` of the
+      # user's that the evaluated code calls cannot take the call.
       var elemAccess = createTokenBuf(8)
       copyIntoKind elemAccess, CallS, c.info:
-        elemAccess.addIdent "[]", c.info
+        addSystemRoutine elemAccess, "[]", c.info
         copyTree elemAccess, param
         copyIntoSymUse elemAccess, indexVar, c.info
       entryPoint(c, baseType, readonlyCursorAt(elemAccess, 0))
@@ -799,10 +811,13 @@ proc executeExpr*(s: var SemContext; expr: Cursor; expectedType: TypeCursor;
   c.dest.addParLe StmtsS, info
 
   c.dest.copyIntoKind ImportS, info:
-    c.dest.copyIntoKind InfixX, info:
-      c.dest.addIdent "/", info
-      c.dest.addIdent "std", info
-      c.dest.addIdent "writenif", info
+    c.dest.copyIntoKind InfixX, info: # std/writenif as `writenif
+      c.dest.addIdent "as", info
+      c.dest.copyIntoKind InfixX, info:
+        c.dest.addIdent "/", info
+        c.dest.addIdent "std", info
+        c.dest.addIdent "writenif", info
+      c.dest.addIdent WriteNifAlias, info
 
   if s.importSnippets.len > 0:
     # buffer-level `add` keeps the seals intact; a token-by-token `add`
