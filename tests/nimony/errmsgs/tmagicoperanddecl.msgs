@@ -4,3 +4,5 @@ tests/nimony/errmsgs/tmagicoperanddecl.nim(11, 1) Trace: instantiation from here
 tests/nimony/errmsgs/tmagicoperanddecl.nim(11, 6) Error: undeclared identifier: b
 tests/nimony/errmsgs/tmagicoperanddecl.nim(13, 1) Trace: instantiation from here
 tests/nimony/errmsgs/tmagicoperanddecl.nim(13, 6) Error: undeclared identifier: c
+tests/nimony/errmsgs/tmagicoperanddecl.nim(15, 1) Trace: instantiation from here
+tests/nimony/errmsgs/tmagicoperanddecl.nim(15, 6) Error: undeclared identifier: d

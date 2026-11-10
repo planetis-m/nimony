@@ -1,0 +1,8 @@
+tests/nimony/errmsgs/ttypeofundeclared.nim(5, 15) Error: undeclared identifier: zzz1
+tests/nimony/errmsgs/ttypeofundeclared.nim(6, 19) Error: undeclared identifier: zzz2
+tests/nimony/errmsgs/ttypeofundeclared.nim(7, 15) Error: undeclared identifier: zzz3
+tests/nimony/errmsgs/ttypeofundeclared.nim(11, 15) Error: undeclared identifier: zzz4
+tests/nimony/errmsgs/ttypeofundeclared.nim(13, 18) Error: undeclared identifier: zzz5
+tests/nimony/errmsgs/ttypeofundeclared.nim(16, 17) Error: undeclared identifier: zzz7
+tests/nimony/errmsgs/ttypeofundeclared.nim(19, 17) Error: undeclared identifier: zzz8
+tests/nimony/errmsgs/ttypeofundeclared.nim(23, 24) Error: undeclared identifier: zzz9

@@ -1937,20 +1937,35 @@ proc semTypeof(c: var SemContext; dest: var TokenBuf; it: var Item) =
   else:
     assert false
 
-  semExpr c, dest, it, semFlags
-  var t = it.typ
-  if t.typeKind == TypedescT: inc t
-  # `typeof` produces the *value* type: drop reference qualifiers so that e.g.
-  # `typeof(s[i])` over a `var seq`/`openArray` is the element type `T`, not
-  # `var T`. Without this `seq[typeof(s[0])]` becomes `seq[var T]`, which then
-  # mismatches plain `T` elements (notably inside `mapIt`/`filterIt` templates).
-  while t.typeKind in {MutT, OutT, LentT, SinkT}:
-    inc t
-  dest.shrink beforeExpr
-  dest.addParLe(TypedescT, t.info)
-  dest.addSubtree t
-  dest.addParRi()
-  it.typ = typeToCursor(c, dest, beforeExpr)
+  let beforeOperand = dest.len
+  # the operand is never emitted, so its declarations are local to it
+  withNewScope c:
+    semExpr c, dest, it, semFlags
+  if hasErrorSince(dest, beforeOperand):
+    # An operand that does not type-check has no type to give: its error is
+    # the result, wrapped message-less like a call over an erroneous argument
+    # (`semcall`), so the operand's own diagnostic is the one reported.
+    var errBuf = createTokenBuf()
+    errBuf.buildTree ErrT, typeofStart.info:
+      errBuf.addSubtree readonlyCursorAt(dest, beforeOperand)
+      errBuf.addStrLit("", typeofStart.info)
+    dest.shrink beforeExpr
+    dest.add errBuf
+    it.typ = c.types.autoType
+  else:
+    var t = it.typ
+    if t.typeKind == TypedescT: inc t
+    # `typeof` produces the *value* type: drop reference qualifiers so that e.g.
+    # `typeof(s[i])` over a `var seq`/`openArray` is the element type `T`, not
+    # `var T`. Without this `seq[typeof(s[0])]` becomes `seq[var T]`, which then
+    # mismatches plain `T` elements (notably inside `mapIt`/`filterIt` templates).
+    while t.typeKind in {MutT, OutT, LentT, SinkT}:
+      inc t
+    dest.shrink beforeExpr
+    dest.addParLe(TypedescT, t.info)
+    dest.addSubtree t
+    dest.addParRi()
+    it.typ = typeToCursor(c, dest, beforeExpr)
   #echo "CAME HERE! ", typeToString(t), " ", c.phase
   #writeStackTrace()
   skip it.n # skip mode

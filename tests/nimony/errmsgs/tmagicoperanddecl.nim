@@ -11,3 +11,5 @@ echo((let b = 1; b) is int)
 echo b
 echo astToStr((let c = 1; c))
 echo c
+type T = typeof((let d = 1; d))
+echo d
