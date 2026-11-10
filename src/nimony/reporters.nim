@@ -124,7 +124,10 @@ proc reportErrorsRec(r: var Reporter; n: var Cursor; errTag: TagId; count: var i
       if n.cursorTagId == errTag:
         inc count
         let info = n.info
-        let doReport = not r.reportedErrSources.containsOrIncl(info)
+        # A position counts as reported once a message was printed for it;
+        # a silent `(err …)` (below) must not claim it, or an error nested in
+        # its payload at the same position (`typeof zzz`) is never shown.
+        let doReport = info notin r.reportedErrSources
         n.peekInto:
           # original expression, optional; remember it — it may contain nested
           # `(err …)` nodes of its own (classic's linear token scan reported
@@ -146,6 +149,7 @@ proc reportErrorsRec(r: var Reporter; n: var Cursor; errTag: TagId; count: var i
           # itself erroneous. Printing again would just stack noise on top.
           if n.isStringLit:
             if doReport and pool.strings[n.strId].len > 0:
+              r.reportedErrSources.incl info
               r.error infoToStr(info), pool.strings[n.strId]
             inc n
           if not cursorIsNil(payload):

@@ -5,6 +5,7 @@ import std/syncio
 var a: typeof(zzz1)
 var b: typeof(1 + zzz2)
 var c: typeof(zzz3, typeOfProc)
+var e: typeof zzz6
 
 type
   O = object
