@@ -1269,11 +1269,9 @@ proc resolveOverloads(c: var SemContext; dest: var TokenBuf; it: var Item; cs: v
   if idx >= 0:
     dest.addParLe(cs.callNode.tagId, cs.callNodeInfo)
     let finalFn = m[idx].fn
+    # only merge symbols defined in args to scope if we did not match a macro/template:
+    closeArgsScope c, cs, merge = finalFn.kind notin {MacroY, TemplateY}
     let isMagic = c.addFn(dest, finalFn, cs.fn.n, m[idx])
-    # merge symbols defined in args only when the args are final: a template,
-    # macro or magic call checks them again and declares them then
-    closeArgsScope c, cs, merge = finalFn.kind notin {MacroY, TemplateY} and
-                                  isMagic != MagicCallNeedsSemcheck
     if finalFn.kind notin {TemplateY, MacroY}:
       # Nim 2 compat: if a typed-varargs slot matched, replace the flat
       # tail of `m.args` with the openArray bundle so the next line emits
