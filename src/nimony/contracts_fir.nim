@@ -2854,6 +2854,10 @@ proc translateCond(c: var FirContext; pc: var Cursor; kind: var CondKind;
       traverseExpr c, pc, call
     return result
 
+  # filled by `valueBounds` below; declared here, as a declaration inside the
+  # `and` operand would be local to that operand
+  var leftLo = zero()
+  var leftHi = zero()
   if r.isIntLit:
     result.a = VarId(0)
     result.c = -createXint(r.intVal)
@@ -2886,7 +2890,7 @@ proc translateCond(c: var FirContext; pc: var Cursor; kind: var CondKind;
     result.a = VarId(0)
     skip r
   elif xk in {LeX, LtX} and r.exprKind in {BitandX, ShrX, AshrX} and
-      (var leftLo = zero(); var leftHi = zero(); valueBounds(c, r, leftLo, leftHi)):
+      valueBounds(c, r, leftLo, leftHi):
     # `e <= b + c` with `lo <= e` implies `lo <= b + c`
     result.a = VarId(0)
     result.c = -leftLo
@@ -2897,8 +2901,10 @@ proc translateCond(c: var FirContext; pc: var Cursor; kind: var CondKind;
     return result
   if r.exprKind == NilX and kind != ckImplied:
     kind = ckPlain
+  var rightLo = zero()
+  var rightHi = zero()
   if xk in {LeX, LtX} and kind != ckImplied and r.exprKind in {BitandX, ShrX, AshrX} and
-      (var rightLo = zero(); var rightHi = zero(); valueBounds(c, r, rightLo, rightHi)):
+      valueBounds(c, r, rightLo, rightHi):
     # `a <= e` with `e <= hi` implies `a <= hi`
     result.b = VarId(0)
     result.c = result.c + rightHi
