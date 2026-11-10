@@ -55,6 +55,16 @@ proc resumeShadows*(s: Scope; undo: sink seq[Table[StrId, int]]) =
 proc openShadowScope*(s: Scope) =
   s.undo.add initTable[StrId, int]()
 
+proc commitShadowScope*(s: Scope) =
+  ## Keeps the declarations; an enclosing shadow scope still rolls them back,
+  ## as its undo table takes over the entries it does not have yet.
+  let last = s.undo.len - 1
+  if last > 0:
+    for k, oldLen in uncheckedBorrow(s.undo[last]):
+      if not s.undo[last-1].hasKey(k):
+        s.undo[last-1][k] = oldLen
+  s.undo.shrink last
+
 proc rollbackShadowScope*(s: Scope) =
   let last = s.undo.len - 1
   for k, oldLen in uncheckedBorrow(s.undo[last]):

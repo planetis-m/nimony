@@ -7,3 +7,9 @@ tests/nimony/errmsgs/targdecllocal.nim(23, 9) Error: undeclared identifier: a6
 tests/nimony/errmsgs/targdecllocal.nim(25, 9) Error: undeclared identifier: a8
 tests/nimony/errmsgs/targdecllocal.nim(27, 9) Error: undeclared identifier: a9
 tests/nimony/errmsgs/targdecllocal.nim(29, 9) Error: undeclared identifier: a11
+tests/nimony/errmsgs/targdecllocal.nim(34, 33) Error: undeclared identifier: a12
+tests/nimony/errmsgs/targdecllocal.nim(38, 9) Error: undeclared identifier: a13
+tests/nimony/errmsgs/targdecllocal.nim(40, 9) Error: undeclared identifier: a14
+tests/nimony/errmsgs/targdecllocal.nim(42, 15) Error: cannot evaluate expression at compile time: (
+let a15: int64 = 1; a15)
+tests/nimony/errmsgs/targdecllocal.nim(43, 9) Error: undeclared identifier: a15

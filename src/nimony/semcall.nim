@@ -643,7 +643,10 @@ proc semSumTypeConstrFromCall(c: var SemContext; dest: var TokenBuf;
       return
   objBuf.addParRi()
   var objConstr = Item(n: cursorAt(objBuf, 0), typ: it.typ)
+  # the arguments are checked again as field values: still local to the call
+  openShadowScope(c.currentScope)
   semObjConstr c, dest, objConstr
+  rollbackShadowScope(c.currentScope)
   it.typ = objConstr.typ
 
 proc anyArgTypeIsError(cs: CallState): bool =
@@ -1327,7 +1330,10 @@ proc resolveOverloads(c: var SemContext; dest: var TokenBuf; it: var Item; cs: v
       endRead magicExprN
       dest.shrink cs.beforeCall
       var magicExpr = Item(n: cursorAt(magicExprBuf, 0), typ: it.typ)
+      # the magic checks its arguments again: in a scope of their own, too
+      openShadowScope(c.currentScope)
       semExpr c, dest, magicExpr, cs.flags
+      rollbackShadowScope(c.currentScope)
       it.typ = magicExpr.typ
     elif finalFn.kind == IteratorY and PreferIterators notin cs.flags:
       buildErr c, dest, cs.callNodeInfo, "Iterators can be called only in `for` statements"
@@ -1599,7 +1605,9 @@ proc semCall(c: var SemContext; dest: var TokenBuf; it: var Item; flags: set[Sem
     var lhsBuf = createTokenBuf(4)
     let lhsOrig = cs.fn.n
     var lhs = Item(n: cs.fn.n, typ: c.types.autoType)
+    openShadowScope(c.currentScope) # the receiver is an argument or the callee
     semExpr c, lhsBuf, lhs, {AllowModuleSym}
+    rollbackShadowScope(c.currentScope)
     cs.fn.n = lhs.n
     lhs.n = cursorAt(lhsBuf, 0)
     let fieldNameCursor = cs.fn.n
@@ -1680,7 +1688,9 @@ proc semCall(c: var SemContext; dest: var TokenBuf; it: var Item; flags: set[Sem
     # `KeepChoices`: an argument that is a symbol choice stays one — the formal
     # parameter it ends up matching is what picks the candidate, so lookup must
     # not collapse it by scope distance nor declare it ambiguous here.
+    openShadowScope(c.currentScope) # each argument is a scope of its own
     semExpr c, dest, arg, {AllowEmpty, KeepChoices}
+    rollbackShadowScope(c.currentScope)
     if named:
       dest.addParRi(arg.n.endInfo)
       # reset only reachable inside `if named:`, where namedStart was set:

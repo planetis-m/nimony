@@ -1364,6 +1364,8 @@ proc semDot(c: var SemContext; dest: var TokenBuf, it: var Item; flags: set[SemF
   it.n = sub(it.n) # skip tag
   var lhsBuf = createTokenBuf(4)
   var lhs = Item(n: it.n, typ: c.types.autoType)
+  # `a.b` may turn out to be the call `b(a)`, whose argument is local to it
+  openShadowScope(c.currentScope)
   semExpr c, lhsBuf, lhs, {AllowModuleSym}
   it.n = lhs.n
   lhs.n = cursorAt(lhsBuf, 0)
@@ -1385,6 +1387,8 @@ proc semDot(c: var SemContext; dest: var TokenBuf, it: var Item; flags: set[SemF
   it.n = dotStart; skip it.n
   # now interpret the dot expression:
   let state = tryBuiltinDot(c, dest, it, lhs, fieldName, info, innerFlags, accessToken)
+  if state == FailedDot: rollbackShadowScope(c.currentScope)
+  else: commitShadowScope(c.currentScope)
   if state == FailedDot and dotLhsModuleSym(lhs) != SymId(0):
     dest.shrink exprStart
     c.buildErr dest, info, "undeclared identifier in module: '" & pool.strings[fieldName] & "'"

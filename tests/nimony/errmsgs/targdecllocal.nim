@@ -27,3 +27,17 @@ discard f(f((let a9 = 1; a9)))
 discard a9
 discard static(f((let a11 = 1; a11)))
 discard a11
+
+# each argument is a scope of its own: a later argument does not see it
+proc g(x, y: int): int = x + y
+proc p() =
+  discard g((let a12 = 1; a12), a12)
+p()
+# a dot call, with and without parentheses, is a call
+discard (let a13 = 1; a13).f
+discard a13
+discard (let a14 = 1; a14).f()
+discard a14
+# a magic checks its operand again in the argument's scope
+discard static((let a15 = 1; a15))
+discard a15

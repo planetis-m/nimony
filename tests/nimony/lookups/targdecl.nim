@@ -9,6 +9,14 @@ template t(v: untyped): untyped = v
 type E = enum A, B
 var arr = [10, 20, 30]
 
+proc g(x, y: int): int = x + y
+echo g((let a = 1; a), (let a = 2; a))
+echo t((let b = 1; b)) + t((let b = 2; b))
+proc q(): int =
+  let r = f((let c = 1; c))
+  let c = 7 # the argument's `c` is gone: no redeclaration
+  result = r + c
+echo q()
 echo arr[(let i = 1; i)], " ", arr[(let i = 2; i)]
 echo $(let e = B; e), " ", $(let e = A; e)
 echo t(f((let a = 1; a))), " ", t(f((let a = 2; a)))
