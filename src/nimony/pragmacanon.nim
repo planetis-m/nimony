@@ -35,9 +35,9 @@ proc isChecked*(c: var CheckedPragmas; n: Cursor; kind: SymKind): bool =
         result = pk in c.pragmas
         if not result:
           c.pragmas.incl pk
-    elif kind.isRoutine and (let cc = callConvKind(n2); cc != NoCallConv):
+    elif kind.isRoutine and callConvKind(n2) != NoCallConv:
       result = c.callconv != NoCallConv
       if not result:
-        c.callconv = cc
+        c.callconv = callConvKind(n2)
     elif (let ident = getIdent(n2); ident != StrId(0)):
       result = c.idents.containsOrIncl(ident)

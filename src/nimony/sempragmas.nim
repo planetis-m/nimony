@@ -175,8 +175,8 @@ proc semPragma*(c: var SemContext; dest: var TokenBuf; n: var Cursor; crucial: v
     pk = pragmaKindByStyle(n.strId)
   case pk
   of NoPragma:
-    if kind.isRoutine and (let cc = callConvKind(n); cc != NoCallConv):
-      dest.addParLe(cc, n.info)
+    if kind.isRoutine and callConvKind(n) != NoCallConv:
+      dest.addParLe(callConvKind(n), n.info)
       toPragmaArgs()
       dest.addParRi()
     elif n.isTagLit and kind == TypeY and (let hk = hookKind(n.cursorTagId); hk != NoHook):

@@ -44,10 +44,10 @@ proc chain(a, b, c: bool; n = 0): string =
     result = "E"
 
 proc withLet(k: bool; n: int): string =
-  # a `let` inside the second operand: skipped when `k` is false, but its name
-  # is still in scope for the arm body
+  # a `let` inside the second operand: skipped when `k` is false; it is local
+  # to the operand, so the arm body recomputes the value
   if k and (let m = n * 2; m > 4):
-    result = "big " & $m
+    result = "big " & $(n * 2)
   else:
     result = "small"
 
