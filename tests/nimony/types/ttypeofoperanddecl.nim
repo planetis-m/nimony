@@ -25,3 +25,13 @@ let q: seq[int] = @[1, 2, 3]
 when typeof(q) is seq[int]:
   echo "q-seq"
 echo q.len
+
+# a declaration in the operand neither clashes with nor shadows an outer one
+proc outer() =
+  let a = "outer"
+  var t: typeof((let a = 1; a)) = 5
+  echo a, " ", t
+outer()
+
+when typeof((let a = 1; a)) is int:
+  echo "int"
