@@ -26,6 +26,6 @@ let e = B
 echo $e, " ", e
 
 # a declaration in the second operand of `and`, used inside the operand
-let n = 3
-if n > 0 and (let m = n * 2; m > 4):
-  echo "big"
+proc big(n: int): bool =
+  result = n > 0 and (let m = n * 2; m > 4)
+echo big(3)
