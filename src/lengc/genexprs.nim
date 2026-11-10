@@ -454,7 +454,8 @@ proc genx(c: var GeneratedCode; n: var Cursor) =
         # `(aconstr T)`: the all-zero array, whatever `T`'s length. A
         # zero-sized array (`a[0]` or an array of zero-sized elements, both
         # GNU extensions) takes `{}`: brace elision would hand the `0` to a
-        # zero-length array, an excess initializer.
+        # zero-length array, an excess initializer. Only arrays reach this
+        # path: desugar keeps the `default` call for objects.
         c.add "0"
       if not isUncheckedArray:
         c.add CurlyRi

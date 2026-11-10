@@ -229,30 +229,13 @@ proc fixedArrayLen*(c: var MainModule; n: Cursor): int =
       result = int(uintVal(t))
 
 proc isZeroSized*(c: var MainModule; n: Cursor): bool =
-  ## Whether the type `n` names occupies no storage: an array of length 0,
-  ## an array of zero-sized elements, or an object whose base and fields
-  ## are all zero-sized. A union counts as sized.
+  ## Whether the array type `n` names occupies no storage: its length is 0,
+  ## or its element type is zero-sized by the same rule. Any other type
+  ## counts as sized.
   var t = navigateToObjectBody(c, n)
-  case t.typeKind
-  of ArrayT:
+  if t.typeKind == ArrayT:
     inc t
     result = fixedArrayLen(c, n) == 0 or isZeroSized(c, t)
-  of ObjectT:
-    result = true
-    t.into:
-      if t.kind == Symbol: result = isZeroSized(c, t)
-      skip t  # inheritance reference
-      while t.hasMore:
-        if not result:
-          skip t
-        elif t.substructureKind == FldU:
-          let decl = takeFieldDecl(t)
-          result = isZeroSized(c, decl.typ)
-        else:
-          # an anonymous object is zero-sized like any other; anything else
-          # (a union, a union branch) is sized
-          result = t.typeKind == ObjectT and isZeroSized(c, t)
-          skip t
   else:
     result = false
 
