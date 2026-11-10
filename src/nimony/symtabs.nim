@@ -55,10 +55,6 @@ proc resumeShadows*(s: Scope; undo: sink seq[Table[StrId, int]]) =
 proc openShadowScope*(s: Scope) =
   s.undo.add initTable[StrId, int]()
 
-proc commitShadowScope*(s: Scope) =
-  let newLen = s.undo.len - 1
-  s.undo.shrink newLen
-
 proc rollbackShadowScope*(s: Scope) =
   let last = s.undo.len - 1
   for k, oldLen in uncheckedBorrow(s.undo[last]):

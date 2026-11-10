@@ -530,16 +530,16 @@ proc leaveCall(dest: var TokenBuf; it: var Item; cs: CallState) =
   dest.addParRi(it.n.endInfo)
   it.n = cs.scope; skip it.n
 
-proc closeArgsScope(c: var SemContext; cs: var CallState; merge = true) =
+proc closeArgsScope(c: var SemContext; cs: var CallState) =
+  ## A declaration inside a call argument is local to that argument: the
+  ## callee may check the argument again or drop it, so whether it is emitted
+  ## is not known here.
   assert not cs.argsScopeClosed, "args scope already closed"
-  if merge:
-    commitShadowScope(c.currentScope)
-  else:
-    rollbackShadowScope(c.currentScope)
+  rollbackShadowScope(c.currentScope)
   cs.argsScopeClosed = true
 
 proc untypedCall(c: var SemContext; dest: var TokenBuf; it: var Item; cs: var CallState) =
-  closeArgsScope c, cs, merge = false
+  closeArgsScope c, cs
   dest.addParLe(cs.callNode.tagId, cs.callNodeInfo)
   dest.addSubtree cs.fn.n
   for a in cs.args:
@@ -1175,7 +1175,7 @@ proc resolveOverloads(c: var SemContext; dest: var TokenBuf; it: var Item; cs: v
       # replaced by the generic "cannot call expression of type auto"
       # (nim-lang/nimony#2553).
       it.n = cs.scope; skip it.n
-      closeArgsScope c, cs, merge = false
+      closeArgsScope c, cs
       buildCallSource dest, cs, cs.fn.n
       return
     else:
@@ -1269,8 +1269,7 @@ proc resolveOverloads(c: var SemContext; dest: var TokenBuf; it: var Item; cs: v
   if idx >= 0:
     dest.addParLe(cs.callNode.tagId, cs.callNodeInfo)
     let finalFn = m[idx].fn
-    # only merge symbols defined in args to scope if we did not match a macro/template:
-    closeArgsScope c, cs, merge = finalFn.kind notin {MacroY, TemplateY}
+    closeArgsScope c, cs
     let isMagic = c.addFn(dest, finalFn, cs.fn.n, m[idx])
     if finalFn.kind notin {TemplateY, MacroY}:
       # Nim 2 compat: if a typed-varargs slot matched, replace the flat
@@ -1388,7 +1387,7 @@ proc resolveOverloads(c: var SemContext; dest: var TokenBuf; it: var Item; cs: v
   else:
     it.n = cs.scope; skip it.n
     # do not add symbols defined in args on failed match:
-    closeArgsScope c, cs, merge = false
+    closeArgsScope c, cs
     var errored = createTokenBuf(4)
     buildCallSource errored, cs, cs.fn.n
     let erroredN = cursorAt(errored, 0)
@@ -1626,7 +1625,7 @@ proc semCall(c: var SemContext; dest: var TokenBuf; it: var Item; flags: set[Sem
       # message under "cannot call expression of type auto" (#2308).
       dest.shrink dotStart
       swap dest, cs.dest
-      closeArgsScope c, cs, merge = false
+      closeArgsScope c, cs
       buildErr c, dest, dotInfo, "undeclared identifier in module: '" &
                  pool.strings[fieldName] & "'"
       it.n = cs.scope; skip it.n

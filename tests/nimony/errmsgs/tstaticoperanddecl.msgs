@@ -1,0 +1,6 @@
+tests/nimony/errmsgs/tstaticoperanddecl.nim(7, 1) Trace: instantiation from here
+tests/nimony/errmsgs/tstaticoperanddecl.nim(7, 12) Error: cannot evaluate expression at compile time: (
+let a: int64 = 1; a + 1)
+tests/nimony/errmsgs/tstaticoperanddecl.nim(8, 1) Trace: instantiation from here
+tests/nimony/errmsgs/tstaticoperanddecl.nim(8, 28) Error: cannot evaluate expression at compile time: (
+let a: int64 = 1; a)
