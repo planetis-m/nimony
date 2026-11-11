@@ -1,5 +1,5 @@
 import std/syncio
-import mconstvec as vm
+import deps/mconstvec as vm
 
 # A `const` of a type with a `ptr UncheckedArray` field is serialized
 # through the `len` and `[]` of the module that declares the type, even
