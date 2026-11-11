@@ -58,9 +58,6 @@ type
     usedModules: HashSet[string]
     errorMsg: string
     indexVars: int           # counter for `newIndexVar`
-    container: TypeCursor    # the object type `unravelObj` serializes
-    containerModules: seq[string] # suffixes of the modules the program
-                                  # imports under an alias, see `containerAlias`
     semCtx: ptr SemContext   # used to resolve `InvokeT` types via sem's
                              # `instantiateType` (kept as a ptr so this
                              # struct stays trivially-copyable; the SemContext
@@ -488,47 +485,9 @@ proc unravelArray(c: var SynthesizeSerializerCtx;
       incIndexVar c, indexVar
   genParRiCall c
 
-proc containerModule(c: var SynthesizeSerializerCtx): string =
-  ## The suffix of the module that declares `c.container` (of its generic
-  ## origin, for an instance), or "" when it is not named by a symbol.
-  result = ""
-  var t = c.container
-  if t.typeKind in {InvokeT, AtT}:
-    inc t
-  if t.isSymbol:
-    var sym = t.symId
-    let typevars = instantiationTypevars(sym)
-    if not cursorIsNil(typevars):
-      sym = typevars.childCursor.symId
-    result = pool.symModule(sym)
-
-proc containerAlias(suffix: string): string =
-  ## Unspellable name under which the program imports the module `suffix`.
-  result = "`" & suffix
-
-proc containerQualifier(c: var SynthesizeSerializerCtx): string =
-  ## `len` and `[]` of the serialized object are those of the module that
-  ## declares its type, called qualified so that a routine of the user's
-  ## with the same signature cannot take the call. Returns the qualifier,
-  ## or "" for a type declared in the evaluating module itself: that one is
-  ## copied into the program, and its routines are called unqualified.
-  let m = containerModule(c)
-  if m == SystemModuleSuffix:
-    result = "system"
-  elif m.len > 0 and m != c.thisModuleSuffix and
-      c.semCtx.processedModules.hasKey(m):
-    if m notin c.containerModules:
-      c.containerModules.add m
-    result = containerAlias(m)
-  else:
-    result = ""
-
-proc addQualified(dest: var TokenBuf; qualifier, name: string; info: NifLineInfo) =
-  if qualifier.len > 0:
-    copyIntoKind dest, DotX, info:
-      dest.addIdent qualifier, info
-      dest.addIdent name, info
-  else:
+proc addSystemRoutine(dest: var TokenBuf; name: string; info: NifLineInfo) =
+  copyIntoKind dest, DotX, info:
+    dest.addIdent "system", info
     dest.addIdent name, info
 
 proc unravelPtrUarrayField(c: var SynthesizeSerializerCtx;
@@ -555,22 +514,22 @@ proc unravelPtrUarrayField(c: var SynthesizeSerializerCtx;
   genStringCall(c, "writeNifParLe", "aconstr")
   genTypeCall(c, uarrayType)
 
-  let qualifier = containerQualifier(c)
   copyIntoKind c.dest, WhileS, c.info:
-    # while idx < len(param), through the container's `len`:
+    # while idx < system.len(param):
     copyIntoKind c.dest, LtX, c.info:
       addIntType c
       copyIntoSymUse c.dest, indexVar, c.info
       copyIntoKind c.dest, CallS, c.info:
-        addQualified c.dest, qualifier, "len", c.info
+        addSystemRoutine c.dest, "len", c.info
         c.dest.add param
     copyIntoKind c.dest, StmtsS, c.info:
-      # entryPoint(baseType, param[idx]), through the container's `[]`
-      # (`containerQualifier`). Using `(arrat …)` would only work for raw
-      # arrays, not for objects (seq, …) that route subscript through `[]`.
+      # entryPoint(baseType, system.`[]`(param, idx)). Using `(arrat …)`
+      # would only work for raw arrays, not for `seq`, which routes
+      # subscript through `[]`. Qualified, so that a `len` or `[]` of the
+      # user's that the evaluated code calls cannot take the call.
       var elemAccess = createTokenBuf(8)
       copyIntoKind elemAccess, CallS, c.info:
-        addQualified elemAccess, qualifier, "[]", c.info
+        addSystemRoutine elemAccess, "[]", c.info
         copyTree elemAccess, param
         copyIntoSymUse elemAccess, indexVar, c.info
       entryPoint(c, baseType, readonlyCursorAt(elemAccess, 0))
@@ -705,7 +664,6 @@ proc unravel(c: var SynthesizeSerializerCtx; orig: TypeCursor; param: TokenBuf) 
   of ObjectT:
     if orig.isSymbol and hasRtti(orig.symId):
       c.routineKind = MethodY
-    c.container = orig
     unravelObj c, typ, param, 0
   of TupleT:
     unravelTuple c, typ, param
@@ -866,7 +824,6 @@ proc executeExpr*(s: var SemContext; expr: Cursor; expectedType: TypeCursor;
     # loop would push open tags whose closes are elided under vpr:
     c.dest.add s.importSnippets
 
-  let containerImportsPos = c.dest.len
   c.dest.copyIntoKind CallS, info:
     c.dest.addSymUse pool.symId("setup.0." & writeNifModuleSuffix), info
     c.dest.addStrLit toAbsolutePath(evalCacheDir(s) / c.newModuleSuffix & ".out.nif"), info
@@ -898,17 +855,6 @@ proc executeExpr*(s: var SemContext; expr: Cursor; expectedType: TypeCursor;
 
   genMissingProcs c
   c.dest.addParRi() # StmtsS
-
-  # The modules `containerQualifier` calls into, under unspellable aliases:
-  var containerImports = createTokenBuf(8)
-  for m in c.containerModules:
-    let path = s.importedModules[s.processedModules[m]].path
-    containerImports.copyIntoKind ImportS, info:
-      containerImports.copyIntoKind InfixX, info:
-        containerImports.addIdent "as", info
-        containerImports.addStrLit path.toAbsolutePath, info
-        containerImports.addIdent containerAlias(m), info
-  c.dest.insert containerImports, containerImportsPos
 
   rewriteSymsToIdents c
 
