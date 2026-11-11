@@ -902,7 +902,7 @@ proc executeExpr*(s: var SemContext; expr: Cursor; expectedType: TypeCursor;
   # The modules `containerQualifier` calls into, under unspellable aliases:
   var containerImports = createTokenBuf(8)
   for m in c.containerModules:
-    let path = s.importedModules.getOrQuit(s.processedModules.getOrQuit(m)).path
+    let path = s.importedModules[s.processedModules[m]].path
     containerImports.copyIntoKind ImportS, info:
       containerImports.copyIntoKind InfixX, info:
         containerImports.addIdent "as", info
