@@ -72,3 +72,7 @@ echo gen(@["a"])
 var t = 0
 twice(inc(t, f(g(t))))
 echo t
+
+# a lambda with a one-line body inside a parenthesised statement list
+let absOf = (discard 0; proc (x: int): int = (if x > 0: x else: -x))
+echo absOf(-3)
