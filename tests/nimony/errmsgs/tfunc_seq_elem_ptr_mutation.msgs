@@ -13,5 +13,8 @@ tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(31, 47) Error: cannot mutat
 tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(45, 35) Error: cannot mutate n.s[0] through a ref/ptr in a `.noSideEffect` context
 tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(46, 38) Error: cannot mutate h.r.s through a ref/ptr in a `.noSideEffect` context
 tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(50, 8) Error: cannot mutate n.s[0] through a ref/ptr in a `.noSideEffect` context
+tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(56, 66) Error: cannot mutate toOpenArray(p, 0, 1)[0] through a ref/ptr in a `.noSideEffect` context
+tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(59, 45) Error: cannot mutate atRef(n) through a ref/ptr in a `.noSideEffect` context
+tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(60, 56) Error: cannot return atRef(n) as `var` through a ref/ptr in a `.noSideEffect` context
 tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(30, 41) Error: cannot mutate n.s[0] through a ref/ptr in a `.noSideEffect` context
 tests/nimony/errmsgs/tfunc_seq_elem_ptr_mutation.nim(30, 49) Error: cannot mutate n.s[1] through a ref/ptr in a `.noSideEffect` context
