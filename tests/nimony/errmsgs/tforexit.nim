@@ -26,6 +26,13 @@ proc neverEntered(c: range[0..8]) =
     break
   {.assert: c <= 6.}            # the `break`'s `2 <= k <= 0` must not reach here
 
+proc firstOf(s: seq[int]): int =
+  for x in s:
+    result = x
+    break
+                                # `result` is not set when `s` is empty
+
 discard search(@[1], 2)
 discard searchGeneric(@["a"], 2)
 neverEntered(8)
+discard firstOf(@[])
