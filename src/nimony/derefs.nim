@@ -344,7 +344,8 @@ proc mutatesThroughPointer(c: var Context; n: Cursor): bool =
   ## the own storage of its `var` parameter, not what the parameter points to.
   ## A call that returns `var T` or a view borrows from its first argument
   ## (`s[i]` for a `seq`, `toOpenArray(s, a, b)`), so the walk continues there,
-  ## as it does into the last expression of a template's `(expr ...)`.
+  ## as it does into the last expression of a template's `(expr ...)`. When that
+  ## first parameter is a `ptr`/`ref` passed by value, the result lies behind it.
   result = false
   var n = n
   while true:
@@ -361,8 +362,14 @@ proc mutatesThroughPointer(c: var Context; n: Cursor): bool =
       let t = getType(c.typeCache, n)
       if t.typeKind != MutT and not isViewType(t): break
       n = sub(n)
+      let fn = n
       skip n # skip the `fn`
       if not n.hasMore: break
+      var formals = skipProcTypeToParams(getType(c.typeCache, fn))
+      inc formals
+      let first = asLocal(formals).typ
+      if first.typeKind notin {MutT, OutT, LentT} and resolvedTypeKind(first) in {PtrT, RefT}:
+        result = true
     of DconvX:
       inc n
       skip n # skip the type
