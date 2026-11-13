@@ -4,9 +4,11 @@
 ## Its own module for the same reason `native` is one: a golden suite over a
 ## backend's output is a concern of its own, and this one is opt-in
 ## (`hastur.mode = skip`) because the LLVM backend cannot build the full
-## stdlib yet.
+## stdlib yet. A test with an `.output` sidecar is a run test instead: it
+## must build with `nimony l` and print `.output`; a subdirectory's
+## `nimony.args` sets its flags.
 
-import std / [syncio, os, strutils, times, algorithm]
+import std / [syncio, os, osproc, strutils, times, algorithm]
 import context, counters, compile, builders
 
 proc extractDebugMetadata(llText: string): string =
@@ -57,16 +59,29 @@ proc runLLVMDebugTests*(dir: string; overwrite: bool) =
   let t0 = epochTime()
   var c = TestCounters(total: 0, failures: 0)
   var files: seq[string] = @[]
-  for x in walkDir(dir):
-    if x.kind == pcFile and x.path.endsWith(".nim") and
-       x.path.extractFilename != "setup.nim":   # the runner itself, not a test
-      files.add x.path
+  for x in walkDirRec(dir):
+    if x.endsWith(".nim") and
+       x.extractFilename != "setup.nim":   # the runner itself, not a test
+      files.add x
   sort files
   for file in files:
     inc c.total
     let cacheArg =
       if nimcacheDir != "nimcache": "--nimcache:" & quoteShell(nimcacheDir) & " "
       else: ""
+    let output = file.changeFileExt(".output")
+    if output.fileExists():
+      # A run test: built with its directory's `nimony.args`, run, and its
+      # stdout compared with the `.output` sidecar.
+      let (compilerOutput, exitCode) = execLocal("nimony", "l --silentMake " &
+        cacheArg & quoteShell(file))
+      if exitCode != 0:
+        failure c, file, "llvm compiler exitcode 0", compilerOutput
+        continue
+      let (runOutput, _) = execCmdEx(quoteShell(file.generatedExeFile(BackendDirLLVM)))
+      if readFile(output).strip != runOutput.strip:
+        failure c, file, readFile(output), runOutput
+      continue
     # The LLVM backend cannot link the full stdlib yet, so the exit code is not
     # meaningful here; the `.ll` is written before linking and is what we check.
     discard execLocal("nimony", "l --silentMake --isMain --inlineframes:on " &
