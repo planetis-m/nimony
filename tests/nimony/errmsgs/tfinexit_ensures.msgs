@@ -1,1 +1,0 @@
-tests/nimony/errmsgs/tfinexit_ensures.nim(9, 5) Error: cannot prove postcondition: result == 0 [pass --verbose for the Final IR]

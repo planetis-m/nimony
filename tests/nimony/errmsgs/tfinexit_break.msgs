@@ -1,1 +1,0 @@
-tests/nimony/errmsgs/tfinexit_break.nim(12, 5) Error: cannot prove assertion: i == 0 [pass --verbose for the Final IR]
