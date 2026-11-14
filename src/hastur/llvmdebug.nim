@@ -11,6 +11,23 @@
 import std / [syncio, os, osproc, strutils, times, algorithm]
 import context, counters, compile, builders
 
+proc normalizeDebugLine(line: string): string =
+  ## `directory: "<abs path>"` -> `directory: "<dir>"` and
+  ## `X60Qini_0_<modulehash>` -> `X60Qini_0_<mod>`.
+  result = line
+  let dirPos = result.find("directory: \"")
+  if dirPos >= 0:
+    let valStart = dirPos + "directory: \"".len
+    let valEnd = result.find('"', valStart)
+    if valEnd > valStart:
+      result = result[0 ..< valStart] & "<dir>" & result[valEnd .. ^1]
+  let sufPos = result.find("X60Qini_0_")
+  if sufPos >= 0:
+    let valStart = sufPos + "X60Qini_0_".len
+    var valEnd = valStart
+    while valEnd < result.len and result[valEnd] notin {'"'}: inc valEnd
+    result = result[0 ..< valStart] & "<mod>" & result[valEnd .. ^1]
+
 proc extractDebugMetadata(llText: string): string =
   ## Keep only the debug metadata lines of a `.ll` file, in order. Everything
   ## else (instructions, types, mangled temporaries) churns with unrelated
@@ -21,26 +38,11 @@ proc extractDebugMetadata(llText: string): string =
   ## the module-hash suffix, which depends on the absolute source path.
   result = ""
   for line in llText.splitLines:
-    var s = line.strip
-    if not s.startsWith("!"): continue
-    if not ("DILocation" in s or "DISubprogram" in s or
-            "DILocalVariable" in s or "DIFile" in s): continue
-    # `directory: "<abs path>"` -> `directory: "<dir>"`
-    let dirPos = s.find("directory: \"")
-    if dirPos >= 0:
-      let valStart = dirPos + "directory: \"".len
-      let valEnd = s.find('"', valStart)
-      if valEnd > valStart:
-        s = s[0 ..< valStart] & "<dir>" & s[valEnd .. ^1]
-    # `X60Qini_0_<modulehash>` -> `X60Qini_0_<mod>`
-    let sufPos = s.find("X60Qini_0_")
-    if sufPos >= 0:
-      let valStart = sufPos + "X60Qini_0_".len
-      var valEnd = valStart
-      while valEnd < s.len and s[valEnd] notin {'"'}: inc valEnd
-      s = s[0 ..< valStart] & "<mod>" & s[valEnd .. ^1]
-    result.add s
-    result.add "\n"
+    let s = line.strip
+    if s.startsWith("!") and ("DILocation" in s or "DISubprogram" in s or
+                              "DILocalVariable" in s or "DIFile" in s):
+      result.add normalizeDebugLine(s)
+      result.add "\n"
 
 proc runOutputTest(c: var TestCounters; file, output, cacheArg: string) =
   ## A run test: built with its directory's `nimony.args`, run, and its stdout
@@ -53,6 +55,28 @@ proc runOutputTest(c: var TestCounters; file, output, cacheArg: string) =
     let (runOutput, _) = execCmdEx(quoteShell(file.generatedExeFile(BackendDirLLVM)))
     if readFile(output).strip != runOutput.strip:
       failure c, file, readFile(output), runOutput
+
+proc runGoldenTest(c: var TestCounters; file, cacheArg: string; overwrite: bool) =
+  ## A debug-info golden: the debug metadata of the emitted `.ll` is compared
+  ## with `<test>.ll.expected`.
+  # The LLVM backend cannot link the full stdlib yet, so the exit code is not
+  # meaningful here; the `.ll` is written before linking and is what we check.
+  discard execLocal("nimony", "l --silentMake --isMain --inlineframes:on " &
+    cacheArg & quoteShell(file))
+  let llFile = generatedFile(file, ".ll", BackendDirLLVM)
+  if not llFile.fileExists():
+    failure c, file, "lengc .ll", "missing: " & llFile
+  else:
+    let actual = extractDebugMetadata(readFile(llFile))
+    let expectedFile = file.changeFileExt(".ll.expected")
+    if overwrite:
+      writeFile(expectedFile, actual)
+    elif not expectedFile.fileExists():
+      failure c, file, "golden debug metadata", "missing: " & expectedFile
+    else:
+      let expected = readFile(expectedFile)
+      if expected.strip != actual.strip:
+        failure c, file, expected, actual
 
 proc runLLVMDebugTests*(dir: string; overwrite: bool) =
   ## Golden suite over the LLVM backend's *debug metadata*. For each `.nim`,
@@ -85,24 +109,7 @@ proc runLLVMDebugTests*(dir: string; overwrite: bool) =
     if output.fileExists():
       runOutputTest(c, file, output, cacheArg)
     else:
-      # The LLVM backend cannot link the full stdlib yet, so the exit code is not
-      # meaningful here; the `.ll` is written before linking and is what we check.
-      discard execLocal("nimony", "l --silentMake --isMain --inlineframes:on " &
-        cacheArg & quoteShell(file))
-      let llFile = generatedFile(file, ".ll", BackendDirLLVM)
-      if not llFile.fileExists():
-        failure c, file, "lengc .ll", "missing: " & llFile
-        continue
-      let actual = extractDebugMetadata(readFile(llFile))
-      let expectedFile = file.changeFileExt(".ll.expected")
-      if overwrite:
-        writeFile(expectedFile, actual)
-      elif not expectedFile.fileExists():
-        failure c, file, "golden debug metadata", "missing: " & expectedFile
-      else:
-        let expected = readFile(expectedFile)
-        if expected.strip != actual.strip:
-          failure c, file, expected, actual
+      runGoldenTest(c, file, cacheArg, overwrite)
   echo c.total - c.failures, " / ", c.total,
     " llvm-debug tests successful in ",
     formatFloat(epochTime() - t0, ffDecimal, precision=2), "s."
