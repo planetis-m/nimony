@@ -8,3 +8,11 @@ finally 4
 4
 finally 7
 0
+defer 1
+1
+finally 4
+4
+finally 7
+0
+defer 2
+2

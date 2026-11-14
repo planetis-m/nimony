@@ -5883,7 +5883,7 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
   let tryStart = n # skip 'try'
   n = sub(n)
   let cp = c.p.flow.checkpoint()
-  let exitsMark = exitsCheckpoint(c.p.tr)
+  let outerExits = stashExits(c.p.tr)
   let baseLive = c.p.tr.live
   var w = LoopWrites(kinds: initTable[VarId, IvKind](),
                      nonNeg: initHashSet[VarId](), opaque: false,
@@ -5932,11 +5932,11 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
   if n.substructureKind == FinU:
     var entry = merged
     var haveEntry = haveMerged
-    joinExitsSince(c.p.tr, exitsMark, entry, haveEntry)
+    joinExits(c.p.tr, entry, haveEntry)
     enterAfterRaise(c, cp, baseLive, wAll, bodyBorrows)
-    if haveEntry:
-      c.p.flow.inclInits entry
-      c.p.flow.inclBorrows borrowsOf(entry)
+    if haveEntry: c.p.flow.inclInits entry
+    # An exit's borrows end with the scopes it leaves.
+    if haveMerged: c.p.flow.inclBorrows borrowsOf(merged)
     n.into:
       traverseStmt c, n, call # finally body
     if not haveMerged: c.p.tr.live = false
@@ -5949,6 +5949,7 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
   else:
     c.p.tr.live = false
     c.p.flow.rollbackTo cp
+  restoreExits(c.p.tr, outerExits)
   n = tryStart; skip n # close 'try'
 
 proc traverseLocal(c: var FirContext; n: var Cursor; call: var CallContext) =
