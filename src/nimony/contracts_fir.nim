@@ -162,6 +162,8 @@ type
                                        # parameters: shared
     destroysAtExit: bool               # a local whose `=destroy` is a barrier
                                        # was declared: `return` runs it
+    fins: seq[Cursor]                  # the `fin`s a `return` here leaves
+                                       # through
     ownEnsures: Cursor
       ## The `.ensures` of the routine being analysed, proven at every exit
       ## (`verifyEnsures`); nil when it has none.
@@ -5719,6 +5721,19 @@ proc traverseJmp(c: var FirContext; n: var Cursor) =
     inc n # symuse
   leaveToLabel(c, label)
 
+proc leaveThroughFin(c: var FirContext; fin: Cursor)
+
+proc verifyEnsuresPastFins(c: var FirContext; resultVar: VarId; info: NifLineInfo;
+                           resultSym: SymId) =
+  ## A `return` runs the `fin`s it leaves through before the routine is left:
+  ## its `.ensures` is judged without what they may write.
+  let here = c.p.flow.checkpoint()
+  for i in 0 ..< c.p.fins.len:
+    let fin = c.p.fins[i]
+    leaveThroughFin(c, fin)
+  verifyEnsures c, resultVar, info, resultSym
+  c.p.flow.rollbackTo here
+
 proc traverseRet(c: var FirContext; n: var Cursor; call: var CallContext) =
   ## `(ret .X)` — primitive return, bound by the proc root. A `return value`
   ## with a non-`result` operand *provides* the result directly (the NJVL path
@@ -5728,23 +5743,26 @@ proc traverseRet(c: var FirContext; n: var Cursor; call: var CallContext) =
   if c.p.destroysAtExit: forgetShared(c)
   n.into:
     if n.isDotToken:
-      verifyEnsures c, (if c.p.resultSym != NoSymId: getVarId(c, c.p.resultSym) else: InvalidVarId), info, c.p.resultSym
+      verifyEnsuresPastFins c, (if c.p.resultSym != NoSymId: getVarId(c, c.p.resultSym) else: InvalidVarId), info, c.p.resultSym
       inc n
     else:
-      var retLoc = plainLocationVarId(c, n)
-      if retLoc == InvalidVarId and not cursorIsNil(c.p.ownEnsures):
-        # `return i - 1`: the value gets a slot of its own to be judged in
-        retLoc = derivedIdOf(c, "#ret", NoSymId)
-        invalidateFactsAbout(c.facts, retLoc)
-        var v = VarId(0)
-        var k = zero()
-        if pureOperand(c, n, plainReading(), v, k):
-          addAsgnFact c, query(retLoc, v, k)
-        elif not sumWithBoundedTerm(c, n, retLoc):
-          addBoundFacts c, retLoc, n
-      verifyEnsures c, retLoc, info, (if n.isSymbol: n.symId else: NoSymId)
       let providesResult = c.p.resultSym != NoSymId and
         not (n.isSymbol and n.symId == c.p.resultSym)
+      # Under a `fin` the value is `result`'s, which the `fin` may change;
+      # else `return i - 1` gets a slot of its own to be judged in.
+      let viaFin = c.p.fins.len > 0 and providesResult
+      var retLoc = plainLocationVarId(c, n)
+      if viaFin or (retLoc == InvalidVarId and not cursorIsNil(c.p.ownEnsures)):
+        retLoc = if viaFin: getVarId(c, c.p.resultSym) else: derivedIdOf(c, "#ret", NoSymId)
+        var v = VarId(0)
+        var k = zero()
+        let pure = pureOperand(c, n, plainReading(), v, k)
+        invalidateFactsAbout(c.facts, retLoc)
+        if pure:
+          if v != retLoc: addAsgnFact c, query(retLoc, v, k)
+        elif not viaFin and not sumWithBoundedTerm(c, n, retLoc):
+          addBoundFacts c, retLoc, n
+      verifyEnsuresPastFins c, retLoc, info, (if n.isSymbol: n.symId else: NoSymId)
       if providesResult:
         # `return toOpenArray(a)` returns the value directly rather than storing
         # it into `result` first, so `traverseAsgn`'s escape check never sees it.
@@ -5871,6 +5889,17 @@ proc enterAfterRaise(c: var FirContext; cp: FlowCp; live: bool; w: LoopWrites;
   forgetWrites(c, w)
   c.p.flow.inclBorrows borrows
 
+proc leaveThroughFin(c: var FirContext; fin: Cursor) =
+  ## Control passes `fin` on the way out: the facts about what it may write,
+  ## and the shared ones at a barrier, no longer hold.
+  var w = LoopWrites(kinds: initTable[VarId, IvKind](),
+                     nonNeg: initHashSet[VarId](), opaque: false,
+                     namedBy: initTable[SymId, int](),
+                     assumed: initHashSet[VarId](),
+                     pendingStep: InvalidVarId)
+  scanWrites(c, fin, w)
+  forgetWrites(c, w)
+
 proc traverseTry(c: var FirContext; n: var Cursor) =
   ## `(try body (except ...)* (fin ...)?)`. A handler is entered as
   ## `enterAfterRaise` says. A `fin` runs on every way out of the `try`, so it
@@ -5891,6 +5920,10 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
                      assumed: initHashSet[VarId](),
                      pendingStep: InvalidVarId)
   scanWrites(c, n, w)
+  var probe = n
+  skip probe
+  while probe.substructureKind == ExceptU: skip probe
+  if probe.substructureKind == FinU: c.p.fins.add probe
 
   traverseStmt c, n, call # try body
   # A handler may run after any point of the body, so it starts with what was
@@ -5933,6 +5966,14 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
     var entry = merged
     var haveEntry = haveMerged
     joinExits(c.p.tr, entry, haveEntry)
+    discard c.p.fins.pop()
+    # The exits the `try` took run the `fin` on the way out.
+    for (key, snap) in pendingExits(c.p.tr):
+      let here = c.p.flow.checkpoint()
+      setTo(c.p.flow, here, snap)
+      leaveThroughFin(c, n)
+      replaceExit(c.p.tr, key, snapshot(c.p.flow))
+      c.p.flow.rollbackTo here
     enterAfterRaise(c, cp, baseLive, wAll, bodyBorrows)
     if haveEntry: c.p.flow.inclInits entry
     # An exit's borrows end with the scopes it leaves.

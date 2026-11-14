@@ -419,12 +419,18 @@ proc takeRaise*(tr: var FlowTracker): bool =
 
 proc exitsCheckpoint*(tr: FlowTracker): int {.inline.} = tr.journal.len
 
+proc pendingExits*(tr: FlowTracker): seq[(ExitKey[SymId], FlowSnap)] =
+  result = @[]
+  for key, snap in tr.exits: result.add (key, snap)
+
+proc replaceExit*(tr: var FlowTracker; key: ExitKey[SymId]; snap: sink FlowSnap) =
+  jPut(tr, key, snap)
+
 proc stashExits*(tr: var FlowTracker): seq[(ExitKey[SymId], FlowSnap)] =
   ## Sets the pending exits aside (journaled), so that the table then holds
   ## only the exits taken from here on: those of a `try`, which its `fin`
   ## runs on. `restoreExits` puts them back.
-  result = @[]
-  for key, snap in tr.exits: result.add (key, snap)
+  result = pendingExits(tr)
   for e in result: jDel(tr, e[0])
 
 proc joinExits*(tr: FlowTracker; acc: var FlowSnap; have: var bool) =

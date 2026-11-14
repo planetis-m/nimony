@@ -1,0 +1,1 @@
+tests/nimony/errmsgs/tfinexit_defer.nim(7, 1) Error: cannot prove postcondition: 0 <= result and result < 8 [pass --verbose for the Final IR]
