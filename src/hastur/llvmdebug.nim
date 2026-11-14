@@ -42,6 +42,18 @@ proc extractDebugMetadata(llText: string): string =
     result.add s
     result.add "\n"
 
+proc runOutputTest(c: var TestCounters; file, output, cacheArg: string) =
+  ## A run test: built with its directory's `nimony.args`, run, and its stdout
+  ## compared with the `.output` sidecar.
+  let (compilerOutput, exitCode) = execLocal("nimony", "l --silentMake " &
+    cacheArg & quoteShell(file))
+  if exitCode != 0:
+    failure c, file, "llvm compiler exitcode 0", compilerOutput
+  else:
+    let (runOutput, _) = execCmdEx(quoteShell(file.generatedExeFile(BackendDirLLVM)))
+    if readFile(output).strip != runOutput.strip:
+      failure c, file, readFile(output), runOutput
+
 proc runLLVMDebugTests*(dir: string; overwrite: bool) =
   ## Golden suite over the LLVM backend's *debug metadata*. For each `.nim`,
   ## compile with `nimony l` and diff the DWARF-relevant metadata lines of the
@@ -71,35 +83,26 @@ proc runLLVMDebugTests*(dir: string; overwrite: bool) =
       else: ""
     let output = file.changeFileExt(".output")
     if output.fileExists():
-      # A run test: built with its directory's `nimony.args`, run, and its
-      # stdout compared with the `.output` sidecar.
-      let (compilerOutput, exitCode) = execLocal("nimony", "l --silentMake " &
-        cacheArg & quoteShell(file))
-      if exitCode != 0:
-        failure c, file, "llvm compiler exitcode 0", compilerOutput
-        continue
-      let (runOutput, _) = execCmdEx(quoteShell(file.generatedExeFile(BackendDirLLVM)))
-      if readFile(output).strip != runOutput.strip:
-        failure c, file, readFile(output), runOutput
-      continue
-    # The LLVM backend cannot link the full stdlib yet, so the exit code is not
-    # meaningful here; the `.ll` is written before linking and is what we check.
-    discard execLocal("nimony", "l --silentMake --isMain --inlineframes:on " &
-      cacheArg & quoteShell(file))
-    let llFile = generatedFile(file, ".ll", BackendDirLLVM)
-    if not llFile.fileExists():
-      failure c, file, "lengc .ll", "missing: " & llFile
-      continue
-    let actual = extractDebugMetadata(readFile(llFile))
-    let expectedFile = file.changeFileExt(".ll.expected")
-    if overwrite:
-      writeFile(expectedFile, actual)
-    elif not expectedFile.fileExists():
-      failure c, file, "golden debug metadata", "missing: " & expectedFile
+      runOutputTest(c, file, output, cacheArg)
     else:
-      let expected = readFile(expectedFile)
-      if expected.strip != actual.strip:
-        failure c, file, expected, actual
+      # The LLVM backend cannot link the full stdlib yet, so the exit code is not
+      # meaningful here; the `.ll` is written before linking and is what we check.
+      discard execLocal("nimony", "l --silentMake --isMain --inlineframes:on " &
+        cacheArg & quoteShell(file))
+      let llFile = generatedFile(file, ".ll", BackendDirLLVM)
+      if not llFile.fileExists():
+        failure c, file, "lengc .ll", "missing: " & llFile
+        continue
+      let actual = extractDebugMetadata(readFile(llFile))
+      let expectedFile = file.changeFileExt(".ll.expected")
+      if overwrite:
+        writeFile(expectedFile, actual)
+      elif not expectedFile.fileExists():
+        failure c, file, "golden debug metadata", "missing: " & expectedFile
+      else:
+        let expected = readFile(expectedFile)
+        if expected.strip != actual.strip:
+          failure c, file, expected, actual
   echo c.total - c.failures, " / ", c.total,
     " llvm-debug tests successful in ",
     formatFloat(epochTime() - t0, ffDecimal, precision=2), "s."
