@@ -356,15 +356,17 @@ proc jDel(tr: var FlowTracker; key: ExitKey[SymId]) =
 
 # ---- leaving
 
+proc joinExit(tr: var FlowTracker; key: ExitKey[SymId]; snap: sink FlowSnap) =
+  if key in tr.exits:
+    jPut(tr, key, joinSnap(getOrDefault(tr.exits, key), snap))
+  else:
+    jPut(tr, key, snap)
+
 proc leaveVia(tr: var FlowTracker; fs: FlowState; key: ExitKey[SymId]) =
   ## Record the current state at `key` (joining with any earlier arrival) and
   ## stop falling through. A leave from a dead point is unreachable — ignored.
   if tr.live:
-    let snap = snapshot(fs)
-    if key in tr.exits:
-      jPut(tr, key, joinSnap(getOrDefault(tr.exits, key), snap))
-    else:
-      jPut(tr, key, snap)
+    joinExit(tr, key, snapshot(fs))
     tr.live = false
 
 proc gotoLabel*(tr: var FlowTracker; fs: FlowState; label: SymId) {.inline.} =
@@ -419,33 +421,15 @@ proc takeRaise*(tr: var FlowTracker): bool =
 
 proc exitsCheckpoint*(tr: FlowTracker): int {.inline.} = tr.journal.len
 
-proc pendingExits*(tr: FlowTracker): seq[(ExitKey[SymId], FlowSnap)] =
+proc stashExits*(tr: var FlowTracker): seq[(ExitKey[SymId], FlowSnap)] =
+  ## Takes the pending exits out (journaled), so that the table then holds
+  ## only the exits taken from here on. `restoreExits` joins them back in.
   result = @[]
   for key, snap in tr.exits: result.add (key, snap)
-
-proc replaceExit*(tr: var FlowTracker; key: ExitKey[SymId]; snap: sink FlowSnap) =
-  jPut(tr, key, snap)
-
-proc stashExits*(tr: var FlowTracker): seq[(ExitKey[SymId], FlowSnap)] =
-  ## Sets the pending exits aside (journaled), so that the table then holds
-  ## only the exits taken from here on: those of a `try`, which its `fin`
-  ## runs on. `restoreExits` puts them back.
-  result = pendingExits(tr)
   for e in result: jDel(tr, e[0])
 
-proc joinExits*(tr: FlowTracker; acc: var FlowSnap; have: var bool) =
-  ## Joins the state of every pending exit into `acc`.
-  for snap in tr.exits.values:
-    acc = if have: joinSnap(acc, snap) else: snap
-    have = true
-
 proc restoreExits*(tr: var FlowTracker; saved: seq[(ExitKey[SymId], FlowSnap)]) =
-  ## Joins the exits `stashExits` set aside back in.
-  for e in saved:
-    if e[0] in tr.exits:
-      jPut(tr, e[0], joinSnap(getOrDefault(tr.exits, e[0]), e[1]))
-    else:
-      jPut(tr, e[0], e[1])
+  for e in saved: joinExit(tr, e[0], e[1])
 
 proc rollbackExits*(tr: var FlowTracker; cp: int) =
   ## Undo every exit-table mutation since `exitsCheckpoint` returned `cp`.
