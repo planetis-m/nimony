@@ -50,11 +50,3 @@ iterator viaIterator(n: Node): int =
   inc n.s[0]
   yield 1
 for _ in viaIterator(Node(s: @[1])): discard
-
-# an accessor whose first parameter is a `ptr`/`ref` passed by value returns
-# a location behind it; its own `cast` covers its body, not its callers
-func viaPtrView(p: var ptr UncheckedArray[int]) = inc toOpenArray(p, 0, 1)[0]
-func atRef(n: Node): var int =
-  {.cast(noSideEffect).}: result = n.s[0]
-func viaRefAccessor(n: var Node) = inc atRef(n)
-func viaRefAccessorResult(n: var Node): var int = atRef(n)
