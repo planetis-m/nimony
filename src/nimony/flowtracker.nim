@@ -419,6 +419,18 @@ proc takeRaise*(tr: var FlowTracker): bool =
 
 proc exitsCheckpoint*(tr: FlowTracker): int {.inline.} = tr.journal.len
 
+proc joinExitsSince*(tr: FlowTracker; cp: int; acc: var FlowSnap; have: var bool) =
+  ## Joins into `acc` the state of every exit taken since `exitsCheckpoint`
+  ## returned `cp` and still pending: a `fin` runs on each of them.
+  var seen = initHashSet[ExitKey[SymId]]()
+  for i in cp ..< tr.journal.len:
+    let key = tr.journal[i].key
+    if key notin seen and key in tr.exits:
+      seen.incl key
+      let snap = getOrDefault(tr.exits, key)
+      acc = if have: joinSnap(acc, snap) else: snap
+      have = true
+
 proc rollbackExits*(tr: var FlowTracker; cp: int) =
   ## Undo every exit-table mutation since `exitsCheckpoint` returned `cp`.
   while tr.journal.len > cp:

@@ -5875,13 +5875,15 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
   ## `(try body (except ...)* (fin ...)?)`. A handler is entered as
   ## `enterAfterRaise` says. A `fin` runs on every way out of the `try`, so it
   ## is reached whenever the `try` is, and it is entered as a raise from the
-  ## body or a handler leaves it. Its inits are the fall-through's, and are
-  ## not propagated onto exit paths (sound, since that only withholds
-  ## knowledge).
+  ## body or a handler leaves it. Its inits are those that hold on the
+  ## fall-through and on every exit (`ret`, `jmp`, `raise`) leaving through
+  ## it; the fall-through past it has its own back. The `fin`'s inits are not
+  ## propagated onto exit paths (sound, since that only withholds knowledge).
   var call = freshCall()
   let tryStart = n # skip 'try'
   n = sub(n)
   let cp = c.p.flow.checkpoint()
+  let exitsMark = exitsCheckpoint(c.p.tr)
   let baseLive = c.p.tr.live
   var w = LoopWrites(kinds: initTable[VarId, IvKind](),
                      nonNeg: initHashSet[VarId](), opaque: false,
@@ -5928,13 +5930,19 @@ proc traverseTry(c: var FirContext; n: var Cursor) =
         haveMerged = true
 
   if n.substructureKind == FinU:
+    var entry = merged
+    var haveEntry = haveMerged
+    joinExitsSince(c.p.tr, exitsMark, entry, haveEntry)
     enterAfterRaise(c, cp, baseLive, wAll, bodyBorrows)
-    if haveMerged:
-      c.p.flow.inclInits merged
-      c.p.flow.inclBorrows borrowsOf(merged)
+    if haveEntry:
+      c.p.flow.inclInits entry
+      c.p.flow.inclBorrows borrowsOf(entry)
     n.into:
       traverseStmt c, n, call # finally body
     if not haveMerged: c.p.tr.live = false
+    elif c.p.tr.live:
+      # Past the `fin` only the fall-through goes on, with its own inits.
+      c.p.flow.inclInits merged
   elif haveMerged:
     c.p.tr.live = true
     setTo(c.p.flow, cp, merged)

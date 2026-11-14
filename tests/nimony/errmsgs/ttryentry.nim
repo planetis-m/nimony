@@ -1,8 +1,8 @@
 # What is known inside an `except` or `finally` is what holds on *every* way
 # into it. A handler can be entered from any point of the `try` body that can
 # raise, a call to a `.raises` routine included, and a `finally` on every way
-# out of the `try`. Every assertion here is false on some run. The proven side
-# is `tests/nimony/contracts/texitjoins_ok.nim`.
+# out of the `try`. Every assertion here is false, and the last read of `y`
+# unset, on some run. The proven side is `contracts/texitjoins_ok.nim`.
 
 proc risky(x: int) {.raises.} =
   if x > 3: raise Failure
@@ -56,6 +56,15 @@ proc raiseInHandler(x: int): int {.raises.} =
     y = 0
   finally:
     {.assert: y == 0.}
+
+proc finallyReadsBeforeInit(x: int): int =
+  var y: int
+  result = 0
+  try:
+    if x > 3: return 1
+    y = x
+  finally:
+    result = y                  # `y` is not initialized on the `return`
 
 discard inExcept(9)
 discard finallyAfterReturn(9)
