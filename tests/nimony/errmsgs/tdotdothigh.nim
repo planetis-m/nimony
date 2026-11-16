@@ -24,3 +24,10 @@ proc viaCountup() =
   for i in countup(0, high(int)): s += i
 
 viaCountup()
+
+proc viaUint64(lo: uint64) =
+  var s = 0'u64
+  for i in lo..high(uint64): s += i
+  for i in countup(lo, high(uint64)): s += i
+
+viaUint64(1)

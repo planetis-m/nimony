@@ -16,7 +16,7 @@ iterator `..`*[T: Ordinal and Comparable and Orderable](a, b: T): T {.inline,
       (sizeof(T) == 1 and ord(high(T)) < 127) or
       (sizeof(T) == 2 and ord(high(T)) < 32767) or
       (sizeof(T) == 4 and ord(high(T)) < 2147483647) or
-      (sizeof(T) == 8 and ord(high(T)) < 9223372036854775807),
+      (sizeof(T) == 8 and T isnot SomeUnsignedInt and ord(high(T)) < 9223372036854775807),
     ensures: (a <= result and result <= b).} =
   ## Count up in the range `[a, b]`
   ##
@@ -26,8 +26,8 @@ iterator `..`*[T: Ordinal and Comparable and Orderable](a, b: T): T {.inline,
   ## below what its storage holds: `inc` is not checked for it, so `i` steps
   ## past `high(T)` and the loop ends after all. `for e in ea..ec` and
   ## `for i in 0..10` are fine, `for i in 0..high(int)` is a compile-time
-  ## error. (`ord(high(uint64))` does not fold, so a `uint64` loop up to
-  ## `high` is not caught.)
+  ## error. An unsigned 8-byte type has no bits to spare, and `ord(high(uint64))`
+  ## is not below `high(int)`, so the `requires` excludes it by type.
   var i = a
   when T is range or T is bool:
     # A `range` value past `b` is not one: `inc` on it owes the range
@@ -79,7 +79,7 @@ iterator countup*[T: Ordinal and Comparable and Orderable](a, b: T; step: Positi
       (sizeof(T) == 1 and ord(high(T)) < 127) or
       (sizeof(T) == 2 and ord(high(T)) < 32767) or
       (sizeof(T) == 4 and ord(high(T)) < 2147483647) or
-      (sizeof(T) == 8 and ord(high(T)) < 9223372036854775807),
+      (sizeof(T) == 8 and T isnot SomeUnsignedInt and ord(high(T)) < 9223372036854775807),
     ensures: (a <= result and result <= b).} =
   ## Counts from ordinal value `a` to `b` (inclusive) with the given
   ## step count.
