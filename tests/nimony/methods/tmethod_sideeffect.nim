@@ -14,6 +14,7 @@ type
     x: T
   H = ref object of G[int]
   K[T] = ref object of A
+  IntBox = ref object of Box[int]
 
 method m(a: A) {.base, noSideEffect.} = discard
 method m(c: C) = echo "x"              # through B, which does not override
@@ -27,3 +28,5 @@ method g[T](x: G[T]) {.base, noSideEffect.} = discard
 method g(h: H) = echo "x"              # the base is generic
 
 method m[T](k: K[T]) = echo "x"        # the override is generic
+
+method size(b: IntBox): int = (echo "size"; 1)  # imported generic base

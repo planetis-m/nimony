@@ -1027,50 +1027,40 @@ proc attachConverter(c: var SemContext; dest: var TokenBuf; symId: SymId;
         # don't register instances
         c.converterIndexMap.add((root, symId))
 
-proc classHead(cls: SymId): SymId =
-  ## The generic type `cls` is an instance of, or `cls` itself: a generic
-  ## method is attached to the head.
-  result = cls
-  let res = tryLoadSym(cls)
-  if res.status == LacksNothing:
-    var inv = asTypeDecl(res.decl).typevars
-    if inv.typeKind == InvokeT:
-      inc inv
-      if inv.isSymbol: result = inv.symId
-
 proc overriddenMethod(c: var SemContext; root: SymId; signature: StrId): SymId =
   ## The method that a method of `root` with `signature` overrides: the one
-  ## with that signature on the nearest ancestor, or `NoSymId`.
+  ## with that signature on the nearest ancestor, or `NoSymId`. A generic
+  ## method is attached to the generic type an ancestor is an instance of.
   result = NoSymId
   for inh in inheritanceChain(root):
     for m in loadVTable(inh):
       if m.signature == signature: return m.fn
-    for cls in [inh, classHead(inh)]:
+    for cls in [inh, skipTypeInstSym(inh)]:
       if c.classes.hasKey(cls):
         for m in c.classes.getOrQuit(cls).methods:
           if m.signature == signature: return m.fn
 
-proc overrideEffectError(c: var SemContext; symId: SymId; pragmas: Cursor): string =
+proc overrideEffectError(c: var SemContext; dest: var TokenBuf; symId: SymId;
+                         beforeParams, beforePragmas: int): string =
   ## A call is judged by the method it resolves to statically, so an override
   ## may have fewer side effects than the method it overrides, never more.
-  ## Asked once every signature of the module is known, so the order of the
-  ## declarations does not matter.
+  ## Asked in the body pass, once every signature of the module is known, so
+  ## the order of the declarations does not matter. The class and the
+  ## signature are derived as `attachMethod` derives them.
   result = ""
-  var root = SymId(0)
-  var signature = StrId(0)
-  if whichEffect(MethodS, pragmas) == HasSideEffect:
-    for cls, entry in c.classes:
-      for m in entry.methods:
-        if m.fn == symId:
-          root = cls
-          signature = m.signature
-  let overridden = if root != SymId(0): overriddenMethod(c, root, signature) else: NoSymId
-  if overridden != NoSymId:
-    let res = tryLoadSym(overridden)
-    if res.status == LacksNothing and
-        whichEffect(res.decl.stmtKind, asRoutine(res.decl).pragmas) == HasNoSideEffect:
-      result = "'" & pool.symBasename(symId) &
-        "' overrides a `noSideEffect` method and must be `noSideEffect` too"
+  let params = cursorAt(dest, beforeParams)
+  var first = params
+  if first.isTagLit: inc first
+  let root = if isParamLike(first.substructureKind): getClass(asLocal(first).typ) else: SymId(0)
+  if root != SymId(0) and whichEffect(MethodS, cursorAt(dest, beforePragmas)) == HasSideEffect:
+    let overridden = overriddenMethod(c, root,
+      pool.strings.getOrIncl(methodKey(pool.symBasename(symId), params)))
+    if overridden != NoSymId:
+      let res = tryLoadSym(overridden)
+      if res.status == LacksNothing and
+          whichEffect(res.decl.stmtKind, asRoutine(res.decl).pragmas) == HasNoSideEffect:
+        result = "'" & pool.symBasename(symId) &
+          "' overrides a `noSideEffect` method and must be `noSideEffect` too"
 
 proc attachMethod(c: var SemContext; dest: var TokenBuf; symId: SymId;
                   declStart, beforeParams, beforeGenericParams: int; info: NifLineInfo) =
@@ -1449,8 +1439,8 @@ proc semProcImpl(c: var SemContext; dest: var TokenBuf; it: var Item; kind: SymK
           intrinsicSignatureError(c, dest, beforeParams, crucial.intrinsic)
         elif InterruptP in crucial.flags:
           interruptSignatureError(dest, beforeParams)
-        elif kind == MethodY and pass == checkBody:
-          overrideEffectError(c, symId, cursorAt(dest, beforePragmas))
+        elif kind == MethodY and pass == checkBody and atToplevel:
+          overrideEffectError(c, dest, symId, beforeParams, beforePragmas)
         else:
           ""
       if it.n.isDotToken:
