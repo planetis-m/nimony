@@ -529,9 +529,10 @@ proc semEnumToStr*(c: var SemContext; dest: var TokenBuf; it: var Item) =
       # Only nominal enum types have a per-type `dollar`.TypeName compiler proc.
       # If we don't have a nominal symbol (e.g. the operand is a type class like
       # `ExprKind|StmtKind|TypeKind`), there is no single `$` to call — report
-      # instead of dereferencing a non-symbol token.
+      # instead of dereferencing a non-symbol token. A sum type's discriminator
+      # (`anum`) has no such proc either.
       let typ = x.typ.skipModifier
-      if typ.kind != Symbol:
+      if typ.kind != Symbol or typeImpl(typ.symId).typeKind == AnumT:
         shrink dest, beforeExpr
         c.buildErr dest, info,
           "'$' is not available for type <" & typeToString(x.typ) & ">"

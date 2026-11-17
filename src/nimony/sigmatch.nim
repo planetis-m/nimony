@@ -441,7 +441,10 @@ proc matchTypeConstraint(m: var Match; f: var Cursor; a: Cursor): bool =
       inc aTag
     f.into:
       assert f.isTagLit
-      result = resolvable and aTag.isTagLit and f.cursorTagId == aTag.cursorTagId
+      # a sum type's discriminator (`anum`) is an enum without holes, as in
+      # `isOrdinalType`:
+      result = resolvable and aTag.isTagLit and (f.cursorTagId == aTag.cursorTagId or
+        f.typeKind == EnumT and aTag.typeKind == AnumT)
       skip f # the empty `(tag)` child
   of OrdinalT:
     case a.typeKind
