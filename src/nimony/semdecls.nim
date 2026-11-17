@@ -404,6 +404,35 @@ proc checkRoutineGlobalInit(c: var SemContext; dest: var TokenBuf; typePos: int)
     c.buildErr dest, info, "the initializer of a `.global` variable cannot refer to the local `" &
       pool.symBasename(culprit) & "`"
 
+proc namesDeferredLocal(c: var SemContext; n: var Cursor): bool =
+  ## `n` looks up a toplevel let/var that the signature phase cannot declare
+  ## early (`resolveDeferredLocal`). Stops at the first one: callers pass a copy.
+  result = false
+  case n.kind
+  of Ident:
+    result = c.deferredLocals.hasKey(n.strId) and not isDeclared(c, n.strId) and
+      not resolveDeferredLocal(c, n.strId)
+    inc n
+  of TagLit:
+    # field names and labels are not looked up: `kv`/`vv` keys, `dot` fields
+    let name = if n.substructureKind in {KvU, VvU}: 0 elif n.exprKind in {DotX, DdotX}: 1 else: -1
+    var i = 0
+    n.loopInto:
+      if i == name: skip n
+      elif namesDeferredLocal(c, n): return true
+      inc i
+  else:
+    inc n
+
+proc defaultWaitsForBodies(c: var SemContext; value: Cursor): bool =
+  ## A parameter default is evaluated at each call, so it may read a toplevel
+  ## let/var, which only the body phase declares. In a routine (checked again
+  ## in the body phase, unlike a proc type in a type section) it is carried
+  ## as written, as an unresolved call is.
+  var n = value
+  result = c.phase == SemcheckSignatures and c.routine.kind != NoSym and
+    c.deferredLocals.len > 0 and namesDeferredLocal(c, n)
+
 proc semLocal(c: var SemContext; dest: var TokenBuf; n: var Cursor; kind: SymKind) =
   var kind = kind
   if kind == TypevarY:
@@ -513,6 +542,8 @@ proc semLocal(c: var SemContext; dest: var TokenBuf; n: var Cursor; kind: SymKin
           c.buildErr errBuf, delayed.info, "field '" & pool.strings[delayed.lit] &
             "' with a default value needs a type"
           it.typ = typeToCursor(c, errBuf, 0)
+        elif kind == ParamY and defaultWaitsForBodies(c, it.n):
+          dest.takeTree it.n # typed `auto` until the body phase
         else:
           semLocalValue c, dest, it, crucial, kind # 4
         n = it.n
@@ -576,6 +607,8 @@ proc semLocal(c: var SemContext; dest: var TokenBuf; n: var Cursor; kind: SymKin
           # like a parameter default. It is carried as written here and
           # checked once in the body phase (`semFieldDefaults`), after every
           # type and layout of the section is known.
+          takeTree dest, n
+        elif kind == ParamY and defaultWaitsForBodies(c, n):
           takeTree dest, n
         else:
           var it = Item(n: n, typ: typ)
@@ -694,7 +727,6 @@ proc resolveDeferredLocal(c: var SemContext; ident: StrId): bool =
   # `getOrDefault` (not `[]`) to avoid the raising `Table.[]` in effect-checked
   # code; `hasKey` above already guarantees the key is present.
   var decl = c.deferredLocals.getOrDefault(ident, default(Cursor))
-  c.deferredLocals.del ident  # resolve at most once
   # A plain `if` (not `case`) because this is a partial map over the handful of
   # local-decl kinds; `case n.stmtKind` would demand an `else`, which the source
   # validator forbids (it enforces exhaustive enumeration for tag discriminators).
@@ -720,6 +752,8 @@ proc resolveDeferredLocal(c: var SemContext; ident: StrId): bool =
   skip typ  # pragmas
   if typ.isDotToken: return false  # inferred: needs the init value
   if not typeSymsAvailable(c, typ): return false
+  # resolve at most once; a decl left deferred stays recorded for `namesDeferredLocal`
+  c.deferredLocals.del ident
   var scratch = createTokenBuf()
   # Force the signature phase so `semLocal` takes its value-verbatim path
   # (the `when` condition is folded at a temporarily-forced body phase).

@@ -9,3 +9,7 @@ proc viaLiteral(a: int; w = (proc (): int = a)()): int = w
 proc gen[T](a: T; w = a): T = w
 template t(a: int; w = a): int = w
 type P = proc (a: int; w = a): int {.nimcall.}
+# also when the default reads a toplevel var, which the body phase checks
+var count = 1
+proc q(a: int; w = a + count): int = w
+proc r(a: int; w = count + a): int = w

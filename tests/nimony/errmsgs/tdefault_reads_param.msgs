@@ -6,3 +6,5 @@ tests/nimony/errmsgs/tdefault_reads_param.nim(8, 39) Error: a default value cann
 tests/nimony/errmsgs/tdefault_reads_param.nim(9, 23) Error: a default value cannot refer to parameter 'a'
 tests/nimony/errmsgs/tdefault_reads_param.nim(10, 24) Error: a default value cannot refer to parameter 'a'
 tests/nimony/errmsgs/tdefault_reads_param.nim(11, 28) Error: a default value cannot refer to parameter 'a'
+tests/nimony/errmsgs/tdefault_reads_param.nim(14, 20) Error: a default value cannot refer to parameter 'a'
+tests/nimony/errmsgs/tdefault_reads_param.nim(15, 28) Error: a default value cannot refer to parameter 'a'
