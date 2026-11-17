@@ -97,3 +97,54 @@ proc main =
   echo "ok"
 
 main()
+
+# A sibling that reads the location through a borrow: `xelim` hoists the
+# `lent` call (or an `openArray` view) into a temp, and the temp is read after
+# the sibling that moves the location (#47 of nimony-bugs-fuzzers).
+type
+  Probe = object
+    id: int
+  ProbePair = object
+    a, b: Probe
+
+var live: array[16, bool]
+var probes = 0
+
+proc `=destroy`(x: Probe) =
+  if x.id != 0:
+    assert live[x.id]
+    live[x.id] = false
+proc `=wasMoved`(x: var Probe) = x.id = 0
+proc `=dup`(x: Probe): Probe {.nodestroy.} =
+  assert live[x.id]          # never a copy of a moved or destroyed value
+  inc probes
+  live[probes] = true
+  result = Probe(id: probes)
+
+proc probe(): Probe =
+  inc probes
+  live[probes] = true
+  result = Probe(id: probes)
+
+proc borrowP(x: var Probe): lent Probe = x
+proc firstP(p: var ProbePair): lent Probe = p.a
+proc dropP(x: sink Probe): int = 7
+proc dropPs(s: sink seq[Probe]): int = s.len
+proc liveCount(a: openArray[Probe]; n: int): int =
+  result = n
+  for x in a:
+    if live[x.id]: inc result
+
+proc borrowedSibling =
+  var x = probe()
+  let t = (borrowP(x), dropP(x))     # the borrow copied after the move
+  assert t[1] == 7
+  var p = ProbePair(a: probe(), b: probe())
+  let q = (p.a, firstP(p))           # the move before the borrow's copy
+  assert q[0].id != q[1].id
+  var s = @[probe(), probe()]
+  assert liveCount(toOpenArray(s, 0, 1), dropPs(s)) == 4
+
+borrowedSibling()
+
+{.feature: "assumeSync".}  # test program: globals shared freely

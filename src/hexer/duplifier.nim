@@ -38,7 +38,8 @@ include ".." / lib / compat2
 import ".." / lib / [nifindexes, symparser, treemangler]
 import lifter, mover, hexer_context, passes, closuretypes, defaultvalues
 import ".." / finalir / finalir_model
-import ".." / nimony / [nimony_model, programs, decls, typenav, renderer, reporters, builtintypes, typekeys]
+import ".." / nimony / [nimony_model, programs, decls, typenav, renderer, reporters, builtintypes, typekeys,
+  typeprops]
 include ".." / nimony / nif_annotations
 
 type
@@ -97,6 +98,8 @@ type
 
 # -------------- helpers ----------------------------------------
 
+proc readLaterThroughBorrow(c: var Context; n: Cursor): bool
+
 proc isLastRead(c: var Context; n: Cursor): bool =
   # This is a hack to make sure that the type cache is populated for the
   # expression we are analysing:
@@ -129,7 +132,8 @@ proc isLastRead(c: var Context; n: Cursor): bool =
       canAnalyse = false
     if canAnalyse:
       var otherUsage = NoLineInfo
-      result = isLastUse(n, c.source[], otherUsage, c.mover)
+      result = isLastUse(n, c.source[], otherUsage, c.mover) and
+        not readLaterThroughBorrow(c, n)
       if ReportLastUse in c.flags:
         echo infoToStr(n.info), " LastUse: ", result
 
@@ -309,6 +313,35 @@ proc expandCallTemps(c: var Context; dest: var TokenBuf; n: Cursor) =
     dest.addParRi()
   else:
     dest.addSubtree n
+
+proc readLaterThroughBorrow(c: var Context; n: Cursor): bool =
+  ## `xelim` hoists `borrow(x)` out of `(borrow(x), drop(x))` into a call temp
+  ## that is read after `x` was handed over: that read is a read of `x`. A
+  ## borrow comes from the call's first argument.
+  result = false
+  var candidates: seq[(SymId, Cursor)] = @[]
+  for tmp, call in c.callTemps.pairs:
+    var arg = call.childCursor
+    skip arg # the routine
+    var probe = arg
+    if arg.hasMore and (containsRoot(probe, n) or mentionsCallTemp(c, arg)):
+      candidates.add (tmp, call)
+  for (tmp, call) in candidates:
+    let typ = getType(c.typeCache, call)
+    if not result and (typ.typeKind in {LentT, MutT} or isViewType(typ)):
+      var arg = call.childCursor
+      skip arg
+      var src = createTokenBuf(8)
+      expandCallTemps c, src, arg
+      var it = beginRead(src)
+      let borrows = containsRoot(it, n)
+      endRead it
+      if borrows:
+        var use = createTokenBuf(1)
+        use.addSymUse tmp, NoLineInfo
+        var loc = beginRead(use)
+        result = isReadAfter(n, loc, c.source[], c.mover)
+        endRead loc
 
 proc isResultUsage(c: Context; n: Cursor): bool {.inline.} =
   result = false
@@ -1014,6 +1047,7 @@ proc trProcDecl(c: var Context; n: var Cursor; parentNodestroy = false) =
   c.resultSym = NoSymId
   c.flags = {}
   var oldUnassigned = move c.unassigned
+  var oldCallTemps = move c.callTemps
   let decl = n
   var r = takeRoutine(n, SkipFinalParRi)
   let symId = r.name.symId
@@ -1048,6 +1082,7 @@ proc trProcDecl(c: var Context; n: var Cursor; parentNodestroy = false) =
   c.flags = oldFlags
   c.retType = oldRetType
   c.unassigned = move oldUnassigned
+  c.callTemps = move oldCallTemps
 
 proc hasDestructor(c: Context; typ: Cursor): bool {.inline.} =
   # `isTrivial(c.lifter[], typ)` consults `c.lifter[].op`, which floats

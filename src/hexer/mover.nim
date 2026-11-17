@@ -205,7 +205,7 @@ proc disjointDirectField(tree: Cursor; r: SymId; x: Cursor): bool =
       if sa.kind != IntLit or sb.kind != IntLit: return false
       if sa.intVal != sb.intVal: return true
 
-proc containsRoot(tree: var Cursor; x: Cursor): bool =
+proc containsRoot*(tree: var Cursor; x: Cursor): bool =
   ## True if `tree` contains a read whose location can alias `x` (the location
   ## being moved out of): the whole root `r`, the exact field, a sub-path, or a
   ## read through a deref of `r`. Statically-disjoint sibling fields/indices of
@@ -661,6 +661,17 @@ proc build(m: var MoverContext; buf: TokenBuf) =
       openAt.add int32(i)
       openLast.add int32(i + subtreeWidth(c) - 1)
   m.built = true
+
+proc isReadAfter*(n, loc: Cursor; buf: var TokenBuf;
+                  mover: var MoverContext): bool =
+  ## Is the location `loc` read after `n`, which sits in `buf`, is evaluated?
+  ## `loc` need not sit in `buf`.
+  if not mover.built:
+    build(mover, buf)
+  let idx = cursorToPosition(buf, n)
+  assert idx >= 0
+  var other = default Cursor
+  result = not isLastReadImpl(mover, buf, int32(idx), loc, other)
 
 proc isLastUse*(n: Cursor; buf: var TokenBuf;
                 otherUsage: var NifLineInfo;
