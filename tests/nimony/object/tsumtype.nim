@@ -1,4 +1,4 @@
-import std/[syncio, assertions]
+import std/[syncio, assertions, opt]
 
 type
   Node = ref object
@@ -87,5 +87,20 @@ proc localSumType(): int =
   result = total(Cons(head: 1, tail: Cons(head: 2, tail: Nil())))
 
 assert localSumType() == 3
+
+# `==` on a sum type compares the hidden discriminator, then the fields:
+type
+  Shape = object
+    case
+    of Circle:
+      r: int
+    of Square:
+      side: int
+
+assert Circle(r: 1) == Circle(r: 1)
+assert Circle(r: 1) != Circle(r: 2)
+assert Circle(r: 1) != Square(side: 1)
+assert some(0) == some(0)
+assert some(0) != none[int]()
 
 echo "tsumtype: OK"
