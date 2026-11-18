@@ -160,6 +160,16 @@ proc flipMsg(f: Flip): string =
   of Ok(n): result = $n
   of {Err}(msg): result = msg
 
-assert flipMsg(flipErr("flip")) == "flip"
+# A constructor names a branch of the expected type, not the first branch
+# of that name in scope:
+let flipped: Flip = Err(msg: "flip")
+assert flipMsg(flipped) == "flip"
+proc flipOk(n: int): Flip = Ok(n: n)
+assert flipMsg(flipOk(3)) == "3"
+type LocalFlip = object # declared here, after `Res`
+  case
+  of Err: lmsg: string
+  of Ok: ln: int
+let localOk: LocalFlip = Ok(ln: 4)
 
 echo "tsumtype_generic: OK"

@@ -5126,7 +5126,13 @@ proc semObjConstr(c: var SemContext; dest: var TokenBuf, it: var Item) =
   it.n = sub(it.n)
   if it.n.isIdent:
     block sumTypeCheck:
-      let efldSym = findOneofEfld(c, it.n.strId)
+      # `Ok(...)` where a sum type is expected names that type's `Ok` when
+      # it is in scope, not the first `Ok` in scope:
+      let st = findSumTypeInfo(expected)
+      var efldSym = SymId(0)
+      if st.valid and st.discrimType.isSymbol:
+        efldSym = findOneofEfld(c, it.n.strId, st.discrimType.symId)
+      if efldSym == SymId(0): efldSym = findOneofEfld(c, it.n.strId)
       if efldSym != SymId(0):
         var inferredExpected = expected
         if expected.typeKind == AutoT:
