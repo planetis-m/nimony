@@ -4950,6 +4950,20 @@ proc checkDestAliasesValue(c: var FirContext; dest: Cursor; value: Cursor) =
           "assign the right-hand side to a temporary first"
         break
 
+proc holdsAddress(c: var FirContext; typ: Cursor): bool =
+  ## Can a value of `typ` be nil? Through `var`, `distinct` and type names.
+  var t = typ
+  var more = true
+  var guard = 0
+  while more and guard < 8:
+    inc guard
+    if t.typeKind in {SinkT, MutT, LentT, OutT, OwnedT, DistinctT}: inc t
+    elif t.isSymbol:
+      let name = t
+      more = typeBody(c, name, t)
+    else: more = false
+  result = t.typeKind in {PtrT, RefT, PointerT, CstringT} + RoutineTypes
+
 proc storeValue(c: var FirContext; n: var Cursor; valueStart, valueFacts: Cursor;
                 call: var CallContext) =
   ## The store half of an assignment, after its value has been analysed: `n`
@@ -5035,14 +5049,16 @@ proc storeValue(c: var FirContext; n: var Cursor; valueStart, valueFacts: Cursor
       projectOut(c.facts, fact.a)
       addBoundFacts c, fact.a, valueFacts
 
-    # Check if the rhs is known to be not nil
-    if (valueStart.exprKind == NewobjX and c.p.procCanRaise) or cannotBeNil(c, valueStart):
+    # Check if the rhs is known to be not nil. Only an address can be nil:
+    # `x = 0'i32` or `x = cast[int8](addr y)` must not state `x >= 1`.
+    if not holdsAddress(c, expected):
+      discard "a number"
+    elif (valueStart.exprKind == NewobjX and c.p.procCanRaise) or cannotBeNil(c, valueStart):
       c.facts.add isNotNil(fact.a)
-    else:
-      # Also check: the destination type might have notnil (e.g. proctype)
-      if markedAs(expected, NotnilU):
-        # The nil-match check already passed, so the value is non-nil
-        c.facts.add isNotNil(fact.a)
+    elif markedAs(expected, NotnilU):
+      # The destination type has notnil (e.g. proctype) and the nil-match
+      # check already passed, so the value is non-nil
+      c.facts.add isNotNil(fact.a)
 
     # The (re)assigned location again holds an in-range value; the fact
     # bookkeeping above may have invalidated its range facts, so restore them.
