@@ -34,6 +34,7 @@ when not defined(nimony):
 
 proc semStmt*(c: var SemContext; dest: var TokenBuf; n: var Cursor; isNewScope: bool)
 proc semStmtBranch(c: var SemContext; dest: var TokenBuf; it: var Item; isNewScope: bool)
+proc addFieldsAccessToken(buf: var TokenBuf; info: NifLineInfo; ownerSym: SymId)
 
 proc semStmtBody(c: var SemContext; dest: var TokenBuf; n: var Cursor; isNewScope: bool) =
   ## The body of a loop, `finally` or `defer`: a branch that produces nothing.
@@ -2543,6 +2544,9 @@ proc semTry(c: var SemContext; dest: var TokenBuf; it: var Item) =
         dec c.routine.inExcept
       closeScope(c)
     if it.n.hasMore and it.n.substructureKind == FinU:
+      # `return x` must store `x` in `result` before the `finally` runs, as it
+      # does under a `defer`: `transformDefer` spells out that sugar.
+      c.routine.hasDefer = true
       takeInto dest, it.n:
         withNewScope c:
           semStmtBody c, dest, it.n, true
@@ -2942,14 +2946,25 @@ type
     fieldType: TypeCursor
     info: NifLineInfo
 
-proc findOneofEfld(c: var SemContext; name: StrId): SymId =
+proc isBranchOf(sym, anum: SymId): bool =
+  ## `sym` is a branch of the sum type whose discriminator type is `anum`,
+  ## or of any sum type when `anum` is `SymId(0)`.
+  result = isAnumEfld(sym)
+  if result and anum != SymId(0):
+    var n = tryLoadSym(sym).decl
+    skipToLocalType n
+    result = n.isSymbol and n.symId == anum
+
+proc findOneofEfld(c: var SemContext; name: StrId; anum = SymId(0)): SymId =
+  ## A `case` pattern passes the selector's `anum`: it names a branch of
+  ## that sum type, not an equally named branch of another one in scope.
   result = SymId(0)
   let ignoreStyle = IgnoreStyleFeature in c.features
   var scope = c.currentScope
   while scope != nil:
     for k in stylesOfScope(scope, name, ignoreStyle):
       for sym in scope.tab.getOrDefault(k):
-        if sym.kind == EfldY and isAnumEfld(sym.name):
+        if sym.kind == EfldY and isBranchOf(sym.name, anum):
           return sym.name
     scope = scope.up
   for realName in stylesOfImport(c.importTab, name, ignoreStyle):
@@ -2958,7 +2973,7 @@ proc findOneofEfld(c: var SemContext; name: StrId): SymId =
       for foreignName in stylesOfIface(iface[], realName, ignoreStyle):
         let candidates = iface[].getOrDefault(foreignName)
         for defId in candidates:
-          if isAnumEfld(defId):
+          if isBranchOf(defId, anum):
             return defId
 
 proc isSumTypeConstr(c: var SemContext; n: Cursor): bool =
@@ -3022,6 +3037,7 @@ proc semSumTypeCaseOfValue(c: var SemContext; dest: var TokenBuf; it: var Item;
     skip it.n
     return
   bindings.setLen 0
+  let anum = selectorType.symId
   takeInto dest, it.n:
     while it.n.hasMore:
       let info = it.n.info
@@ -3030,7 +3046,7 @@ proc semSumTypeCaseOfValue(c: var SemContext; dest: var TokenBuf; it: var Item;
         it.n = sub(it.n)
         if it.n.isIdent:
           let branchName = it.n.strId
-          let efldSym = findOneofEfld(c, branchName)
+          let efldSym = findOneofEfld(c, branchName, anum)
           if efldSym == SymId(0):
             buildErr c, dest, info, "undeclared sum type branch: " & pool.strings[branchName]
             while it.n.hasMore: skip it.n
@@ -3063,7 +3079,7 @@ proc semSumTypeCaseOfValue(c: var SemContext; dest: var TokenBuf; it: var Item;
             while it.n.hasMore:
               if it.n.isIdent:
                 let branchName = it.n.strId
-                let efldSym = findOneofEfld(c, branchName)
+                let efldSym = findOneofEfld(c, branchName, anum)
                 if efldSym == SymId(0):
                   buildErr c, dest, it.n.info, "undeclared sum type branch: " & pool.strings[branchName]
                 else:
@@ -3328,11 +3344,10 @@ proc semCaseImpl(c: var SemContext; dest: var TokenBuf; it: var Item; mode: Case
             let objDecl = getTypeSection(stInfo.objTypeSym)
             typeBindings = bindInvokeArgs(objDecl, stInfo.invokeArgs)
           withNewScope c:
-            var list = createTokenBuf(0)
-            let bodyStart = it.n
-            it.n = bodyAsList(bodyStart, list)
-            dest.addParLe(it.n.cursorTagId, it.n.info)
-            it.n = sub(it.n)
+            # The bindings precede the branch body, which is typed like any
+            # other branch: it can be the value of a `case` expression.
+            let bodyStart = dest.len
+            dest.addParLe(StmtsS, it.n.info)
             for b in bindings:
               var bindName = pool.strings[b.ident]
               c.makeLocalSym(bindName)
@@ -3356,17 +3371,20 @@ proc semCaseImpl(c: var SemContext; dest: var TokenBuf; it: var Item; mode: Case
               for i in 0 ..< savedSelector.len:
                 dest.add savedSelector[i]
               dest.addSymUse(b.fieldSym, b.info)
-              dest.addIntLit(0, b.info)
+              # Like `fields()`, the binding names the field for the code
+              # that matched the branch: the type's module authorizes it.
+              addFieldsAccessToken(dest, b.info,
+                genericRootSym(getTypeSection(stInfo.objTypeSym)))
               dest.addParRi()
               dest.addParRi()
               publish c, dest, bindSym, declStart
               let s = Sym(kind: PatternvarY, name: bindSym, pos: declStart)
               if addNonOverloadable(c.currentScope, b.ident, s) == Conflict:
                 buildErr c, dest, b.info, "attempt to redeclare: " & pool.strings[b.ident]
-            while it.n.hasMore:
-              semStmt c, dest, it.n, false
-            dest.addParRi(it.n.endInfo)
-            it.n = bodyStart; skip it.n
+            semStmtBranch c, dest, it, false
+            dest.addParRi()
+            if classifyType(c, it.typ) notin {VoidT, AutoT}:
+              setTagAt(dest, bodyStart, TagId(ExprTagId))
         else:
           withNewScope c:
             semStmtBranch c, dest, it, true
@@ -5108,7 +5126,13 @@ proc semObjConstr(c: var SemContext; dest: var TokenBuf, it: var Item) =
   it.n = sub(it.n)
   if it.n.isIdent:
     block sumTypeCheck:
-      let efldSym = findOneofEfld(c, it.n.strId)
+      # `Ok(...)` where a sum type is expected names that type's `Ok` when
+      # it is in scope, not the first `Ok` in scope:
+      let st = findSumTypeInfo(expected)
+      var efldSym = SymId(0)
+      if st.valid and st.discrimType.isSymbol:
+        efldSym = findOneofEfld(c, it.n.strId, st.discrimType.symId)
+      if efldSym == SymId(0): efldSym = findOneofEfld(c, it.n.strId)
       if efldSym != SymId(0):
         var inferredExpected = expected
         if expected.typeKind == AutoT:

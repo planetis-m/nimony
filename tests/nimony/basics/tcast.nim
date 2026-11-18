@@ -45,6 +45,19 @@ assert cast[int](cast[float](rx)) == crt
 const np = cast[nil ptr int](nil)
 assert np == nil
 
+# A compile-time cast keeps the bit pattern and zeroes the remaining memory
+# too (planetis-m/nimony-bugs-llms#226).
+const ck = cast[int16](-2'i8)
+const cm = cast[int](-1'i32)
+const cu = cast[uint16](-2'i8)
+const cneg = cast[int8](254'u8) < 0
+const cnot = cast[int16](not 1'i8)
+assert ck == 254'i16
+assert cm == 0xFFFF_FFFF
+assert cu == 254'u16
+assert cneg
+assert cnot == 254'i16
+
 # A cast to a larger type zeroes the remaining memory: a signed source is not
 # sign-extended (planetis-m/nimony-bugs-llms#203).
 type Neg = enum
@@ -58,3 +71,12 @@ assert cast[int16](i8) == 254'i16
 assert cast[uint64](i32) == 0xFFFF_FFFF'u64
 assert cast[int](i32) == 0xFFFF_FFFF
 assert cast[uint64](en) == 0xFFFF_FFFE'u64 # an enum with a negative value is 32 bits
+
+# A cast between an integer and a float of a larger size copies only the
+# source's bytes and zeroes the rest (planetis-m/nimony-bugs-llms#230).
+# `nb` and `na` put non-zero bytes next to the sources.
+var nb = -1'i64
+var bo = true
+var na = -1'i64
+assert cast[uint64](cast[float](bo)) == 1'u64
+assert cast[uint64](cast[float](i32)) == 0xFFFF_FFFF'u64

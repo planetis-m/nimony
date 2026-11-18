@@ -13,6 +13,13 @@ type
     of Right:
       b*: B
 
+  Flip* = object # `Ok`/`Err` in the opposite order of tsumtype_generic's `Res`
+    case
+    of Err:
+      msg*: string
+    of Ok:
+      n*: int
+
   Pair*[T] = object
     first*: T
     second*: T
