@@ -26,8 +26,12 @@ proc collectUnknown(defs: NifCursor; n: NifCursor; missing: var seq[SymId]) =
   ## whole argument, so one request covers a level instead of one round each.
   var n = n
   if n.kind == Symbol:
-    if not findDecl(defs, n.symId).hasMore:
+    let decl = findDecl(defs, n.symId)
+    if not decl.hasMore:
       missing.add n.symId
+    elif decl.stmtKind == TypeS and asTypeDecl(decl).typevars.typeKind == AtT:
+      # A generic instance: `$` renders its arguments, so they are needed too.
+      collectUnknown(defs, asTypeDecl(decl).typevars, missing)
   elif n.kind == TagLit:
     n.into:
       while n.hasMore:

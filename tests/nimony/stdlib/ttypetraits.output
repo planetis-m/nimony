@@ -16,7 +16,8 @@ float32
 array[0..2, int]
 seq[float64]
 Foo[int]
-StaticFoo[3]
+StaticFoo[3, float32]
+Foo[seq[Foo[string]]]
 3
 float32
 true
