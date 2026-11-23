@@ -27,7 +27,7 @@
 ##   shoggoth pat [--from:NIF] [--keep] [--shoggoth] <file.nim> [<substr>]
 ##       pattern-by-example: compile a .nim with nimony and print its NIFC procs.
 
-import std / [os, strutils, syncio, dirs, paths, parseopt, assertions]
+import std / [os, strutils, syncio, dirs, paths, parseopt, assertions, envvars]
 import ".." / ".." / nimony / [langmodes, nifconfig]
 from ".." / ".." / nimony / programs import prog
 import ".." / ".." / hexer / hexer
@@ -166,9 +166,16 @@ proc runOne(input, output: string; verify, stats: bool; target: Target) =
   if stats:
     var parts: seq[string] = @[]
     if st.intermodChanged > 0: parts.add "inliner=" & $st.intermodChanged
+    if st.unroll.full + st.unroll.by2 + st.unroll.by4 > 0:
+      parts.add "unroll=" & $st.unroll.full & "/" & $st.unroll.by2 & "/" & $st.unroll.by4
     echo "  ", extractFilename(input), ": ", st.procs, " procs, ",
          st.bodies, " bodies",
          (if parts.len > 0: "  [" & parts.join(" ") & "]" else: "")
+  if getEnv("SHOGGOTH_UNROLL_STATS").len > 0:
+    let u = st.unroll
+    if u.full + u.by2 + u.by4 > 0:
+      stderr.writeLine "[unroll] ", extractFilename(input),
+                       " full=", u.full, " 2x=", u.by2, " 4x=", u.by4
 
 proc optimizeMain(args: seq[string]) =
   var positional: seq[string] = @[]
@@ -180,7 +187,11 @@ proc optimizeMain(args: seq[string]) =
     if a.startsWith("--outdir:"): outdir = a["--outdir:".len .. ^1]
     elif a == "--verify": verify = true
     elif a == "--stats": stats = true
-    elif a.startsWith("--cpu:"): target.scaledIndex = hasScaledIndex(a["--cpu:".len .. ^1])
+    elif a.startsWith("--cpu:"):
+      let cpu = a["--cpu:".len .. ^1]
+      target.scaledIndex = hasScaledIndex(cpu)
+      target.volatileLocalRegs = volatileRegsFor(cpu)
+    elif a == "--opt:size": target.optSize = true
     elif a == "--vectorize": target.vecMode = vecNeon
     elif a == "--vectorize:sse": target.vecMode = vecSse
     elif a == "--no-mem-intrinsics": target.mem.intrinsics = false   # a back end without the zeroMemIns/copyMemIns rows

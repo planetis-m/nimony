@@ -1452,6 +1452,8 @@ proc generateFinalBuildFile(c: DepContext; commandLineArgsLengc: string; passC, 
         let cpuName = platform.CPU[c.config.targetCPU].name
         # what the passes may assume about addressing (`Target.scaledIndex`)
         b.addStrLit "--cpu:" & cpuName
+        if c.config.optLevel == optSize:
+          b.addStrLit "--opt:size"
         if native and cpuName in ["arm64", "amd64"]:
           # the 128-bit loop vectorizer: emits (instr ...) rows only the native
           # back ends lower — AArch64 via AdvSIMD, x86-64 via SSE2 — so it stays

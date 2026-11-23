@@ -26,6 +26,8 @@ import cse                                     # runCSE + collectFunctionSummari
 import scalarizer                              # runScalarize (object → field scalars / SROA)
 import copyprop                                # runCopyProp (copy prop + dead-store elim)
 import unswitch                                # runUnswitch (loop unswitching)
+import unroll                                  # runUnroll (scalar loop unrolling)
+export UnrollStats
 import imi_bridge                             # runImiOn/parseModule (inter-module inliner)
 import vectorizer                             # runVectorizer (map loops -> (instr ...))
 export VecMode                                # the driver flag's type, for shoggoth.nim
@@ -51,11 +53,19 @@ type
     scaledIndex*: bool        ## `base + index*size` is one addressing mode, so
                               ## `a[i]` costs no more than `p[]` (see
                               ## `induction_variables`)
+    volatileLocalRegs*: int   ## call-free volatile GPRs (`arkham` `intLocalTempRegs`):
+                              ## 4 on x86-64, 12 on AArch64; 0 ⇒ default (4)
+    optSize*: bool            ## `--opt:size`: skip code-growing transforms (unroll)
 
 proc hasScaledIndex*(cpu: string): bool =
   ## x86 and ARM address `[base + index*size]` in one operand (Thumb-2 as
   ## `[rn, rm, lsl #n]`); RISC-V, MIPS, AVR and the rest add first.
   cpu in ["i386", "amd64", "arm32", "arm64"]
+
+proc volatileRegsFor*(cpu: string): int =
+  ## Arkham's `intLocalTempRegs.len` for `cpu`: call-free local GPRs before
+  ## hitting callee-saved prologue push/pop tax.
+  if cpu == "arm64": 12 else: 4
 
 
 let disabledPasses = block:
@@ -69,8 +79,8 @@ let disabledPasses = block:
   ## reaches a fixed point or does not. `SHOGGOTH_NO_VECTORIZE` was the same idea for
   ## one pass; it stays, spelled `vectorize` here as well.
   ##
-  ## Names: imi, rewrite, ctorproj, scalarize, copyprop, unswitch, indvars, cse,
-  ## memidioms (both stages), memloops (only the loop idioms before the
+  ## Names: imi, rewrite, ctorproj, scalarize, copyprop, unswitch, indvars, unroll,
+  ## cse, memidioms (both stages), memloops (only the loop idioms before the
   ## inliner), vectorize, sinkret, tailcall, coldguards.
   var res = initHashSet[string]()
   for part in getEnv("SHOGGOTH_DISABLE").split(','):
@@ -87,6 +97,7 @@ type
     procs*, bodies*, intermodChanged*: int
     checksRemoved*: int
     vectorized*: int
+    unroll*: UnrollStats
     memOps*: set[IntrinsicOp]                 ## the mem rows memidioms emitted
 
 proc extractModuleSuffix(filename: string): string =
@@ -120,7 +131,7 @@ type
     clean: set[CleanupStage]
       ## Stages whose last run is still current: nothing changed the body since.
     changed: bool             ## the current round changed the body
-    sroa, us, iv, cse: int
+    sroa, us, iv, cse, unr: int
       ## The temp counters of the passes that mint locals. A pass that runs
       ## again in a later round continues its own numbering, so it never
       ## declares a name an earlier round already declared.
@@ -213,6 +224,15 @@ proc optimizeBody(buf: var TokenBuf; suffix: string; st: var Stats;
   # substitute into `(deref `x)` and the rewriter then folds — so the fixpoint
   # resumes when it changed anything.
   if passOn("indvars") and runInductionVariables(buf, m, target.scaledIndex, f.iv):
+    mutated(f)
+    cleanupFixpoint(buf, f, st, summaries, m, params, eng)
+  # Scalar loop unrolling runs once after `indvars`: count-to-zero loops already
+  # have literal `stop == 0` (zero extra live regs) and RISC loops already have
+  # pointer walks. Resuming `cleanupFixpoint` folds constants and dead `iv`
+  # writes exposed by full unrolling.
+  if passOn("unroll") and
+     runUnroll(buf, summaries, m, target.optSize, target.volatileLocalRegs,
+               f.unr, addr st.unroll):
     mutated(f)
     cleanupFixpoint(buf, f, st, summaries, m, params, eng)
   # `target.mem.mergeWordBytes` enables merging adjacent constant field

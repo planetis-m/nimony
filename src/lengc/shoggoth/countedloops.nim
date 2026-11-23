@@ -214,7 +214,7 @@ proc detectLoop*(loop: Cursor): DetectedLoop =
      countWrites(body, d.counterSym) == 1:
     result = d
 
-proc startValue(prev: Cursor; s: SymId): Cursor =
+proc startValue*(prev: Cursor; s: SymId): Cursor =
   ## What `(var :IV PRAGMAS T START)` or `(asgn IV START)` sets the counter to.
   result = default(Cursor)
   if not cursorIsNil(prev) and prev.kind == TagLit:
@@ -228,7 +228,7 @@ proc startValue(prev: Cursor; s: SymId): Cursor =
       skip c
       result = c
 
-proc sameTest(g, cond: Cursor; s: SymId; start: Cursor): bool =
+proc sameTest*(g, cond: Cursor; s: SymId; start: Cursor): bool =
   ## `g` is `cond`, or `cond` with the counter replaced by `start` (copy
   ## propagation substitutes the entry value into the guard).
   if isSym(cond, s) and not cursorIsNil(start) and sameTest(g, start, SymId(0), start):
