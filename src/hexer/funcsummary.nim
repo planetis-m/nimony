@@ -30,10 +30,10 @@
 ## alias via identity); param 0 is written and its slot reassigned; param 1 is
 ## read; the result is its own fresh class (`2 == params.len`). See `doc/tags.md`.
 
-import std / [assertions, tables]
+import std / [assertions, tables, sets, os]
 include ".." / lib / nifprelude
 include ".." / lib / compat2
-import ".." / lib / intrinsics
+import ".." / lib / [foreignmodules, intrinsics]
 import ".." / lengc / [leng_model]
 from ".." / nimony / builtintypes import SystemModuleSuffix
 
@@ -60,6 +60,7 @@ type
     readsGlobal*: bool
     callsUnknown*: bool
     raises*: bool
+    noReturn*: bool      ## `(attr "noreturn")` — control never returns to caller
     resultCls*: uint32   ## class the result joins; `== params.len` ⇒ own fresh class
     resultEscapes*: bool
     params*: seq[ParamEffect]
@@ -123,7 +124,7 @@ type
     constRef: seq[bool]                ## per param (length nParams): carries
                                        ## `(constref)`. Not derived from the
                                        ## body — see `ParamEffect.constRef`.
-    writesGlobal, readsGlobal, callsUnknown, raises: bool
+    writesGlobal, readsGlobal, callsUnknown, raises, noReturn: bool
     calls: seq[CallFact]
     copyMem: SymId                     ## `system.copyMem`, see `handleCopyMem`
 
@@ -612,6 +613,20 @@ proc isExternProc(pragmas: Cursor): bool =
       result = true
     skip p
 
+proc isNoReturnProc(pragmas: Cursor): bool =
+  if not pragmas.isTagLit: return false
+  var p = pragmas
+  result = false
+  p.loopInto:
+    if p.isTagLit and p.pragmaKind == AttrP:
+      var a = p
+      a.into:
+        while a.hasMore:
+          if a.kind == StrLit and pool.strings[a.strId] == "noreturn":
+            result = true
+          skip a
+    skip p
+
 proc isPureIntrinsicProc(pragmas: Cursor): bool =
   ## True when `pragmas` names a target instruction or portable intrinsic whose
   ## row in `lib/intrinsics` carries `efPure` (e.g. `Sqrt`, `Clz`, `Ctz`).
@@ -635,6 +650,7 @@ proc computeProcAnalysis(procDecl: Cursor): ProcAnalysis =
   let d = takeProcDecl(p)
   let paramSyms = collectParamSyms(d.params)
   result = ProcAnalysis(nParams: paramSyms.len,
+                        noReturn: isNoReturnProc(d.pragmas),
                         copyMem: pool.symId("copyMem.0." & SystemModuleSuffix))
   result.constRef = collectParamConstRef(d.params)
   result.uf = newSeq[int](paramSyms.len + 1)
@@ -655,7 +671,7 @@ proc computeProcAnalysis(procDecl: Cursor): ProcAnalysis =
 proc finalizeSummary(a: var ProcAnalysis): FunctionSummary =
   result = FunctionSummary(
     writesGlobal: a.writesGlobal, readsGlobal: a.readsGlobal,
-    callsUnknown: a.callsUnknown, raises: a.raises)
+    callsUnknown: a.callsUnknown, raises: a.raises, noReturn: a.noReturn)
   result.params = newSeq[ParamEffect](a.nParams)
   for i in 0 ..< a.nParams:
     result.params[i] = ParamEffect(
@@ -672,6 +688,10 @@ proc computeFunctionSummary*(procDecl: Cursor): FunctionSummary =
   result = finalizeSummary(a)
 
 proc applyCallee(a: var ProcAnalysis; call: CallFact; callee: FunctionSummary) =
+  if callee.noReturn:
+    # Control never returns to `a` or `a`'s caller, so nothing after this call
+    # can observe anything it wrote (arguments were already walked in handleCall).
+    return
   a.raises = a.raises or callee.raises
   a.writesGlobal = a.writesGlobal or callee.writesGlobal
   a.readsGlobal = a.readsGlobal or callee.readsGlobal
@@ -706,10 +726,11 @@ proc applyExternalCall(a: var ProcAnalysis; call: CallFact) =
       markWriteElem(a, r)
       markEscapeElem(a, r)
 
-proc resolveSummaries(analyses: var Table[SymId, ProcAnalysis]): FunctionSummaryTable =
-  ## Least fixpoint over the in-module call graph. Effects are monotone (bits
-  ## only get set, classes only merge), so iteration converges; the cap is a
-  ## safety net.
+proc resolveSummaries(analyses: var Table[SymId, ProcAnalysis];
+                      fixed: FunctionSummaryTable = initTable[SymId, FunctionSummary]()): FunctionSummaryTable =
+  ## Least fixpoint over the loaded call graph (`analyses` plus already-resolved
+  ## summaries in `fixed`). Effects are monotone (bits only get set, classes
+  ## only merge), so iteration converges; the cap is a safety net.
   const MaxIters = 10
   result = initTable[SymId, FunctionSummary]()
   for sym, a in analyses.mpairs:
@@ -723,6 +744,8 @@ proc resolveSummaries(analyses: var Table[SymId, ProcAnalysis]): FunctionSummary
       for call in calls:
         if analyses.hasKey(call.callee):
           applyCallee(a, call, result.getOrDefault(call.callee))
+        elif fixed.hasKey(call.callee):
+          applyCallee(a, call, fixed.getOrDefault(call.callee))
         else:
           applyExternalCall(a, call)
       a.calls = move calls
@@ -740,10 +763,12 @@ proc collectProcAnalyses(buf: var TokenBuf): Table[SymId, ProcAnalysis] =
       while n.hasMore:
         if n.isTagLit and n.stmtKind == ProcS:
           let p = n
-          var d = n
-          inc d
-          if d.isSymbolDef:
-            result[d.symId] = computeProcAnalysis(p)
+          var q = n
+          let pd = takeProcDecl(q)
+          if pd.name.isSymbolDef and
+             (pd.body.isTagLit or isExternProc(pd.pragmas) or
+              isNoReturnProc(pd.pragmas)):
+            result[pd.name.symId] = computeProcAnalysis(p)
         skip n
 
 # ---- serialization --------------------------------------------------------
@@ -808,13 +833,99 @@ proc readSummary(n: var Cursor; outSummary: var FunctionSummary): bool =
 
 proc readSummaryPragma*(pragmas: Cursor; outSummary: var FunctionSummary): bool =
   if not pragmas.isTagLit: return false
+  var found = false
   var p = pragmas
-  p.into:
-    while p.hasMore:
-      if p.isTagLit and p.pragmaKind == SmryP:
-        return readSummary(p, outSummary)
-      skip p
-  result = false
+  p.loopInto:
+    if p.isTagLit and p.pragmaKind == SmryP and not found:
+      var q = p
+      discard readSummary(q, outSummary)
+      found = true
+    skip p
+  if isNoReturnProc(pragmas):
+    outSummary.noReturn = true
+    found = true
+  result = found
+
+const
+  MaxForeignSummaryProcs = 1024
+
+proc openForeignCnif(xnifDir, modul: string;
+                     mods: var Table[string, ForeignModule];
+                     missing: var HashSet[string]): ForeignModule =
+  if modul in mods: return mods.getOrQuit(modul)
+  if modul in missing or xnifDir.len == 0: return nil
+  var xpath = xnifDir / modul & ".c.nif"
+  if not fileExists(xpath):
+    xpath = xnifDir / ".." / modul & ".c.nif"
+  if not fileExists(xpath):
+    missing.incl modul
+    return nil
+  let fm = openForeignModule(xpath)
+  if not fm.hasEmbeddedIndex:
+    missing.incl modul
+    return nil
+  mods[modul] = fm
+  result = fm
+
+proc resolveModuleSummaries*(buf: var TokenBuf;
+                             xnifDir: string): FunctionSummaryTable =
+  ## Recompute summaries for `buf`'s procs (post-inlining) and lazily refine
+  ## cross-module callees from their pre-optimization `.c.nif` files in
+  ## `xnifDir`. Uses a foreign proc's stored `(smry …)` directly whenever it
+  ## is already `noreturn` or free of `callsUnknown`; walks its body only when
+  ## its intra-module summary carried `callsUnknown`.
+  var analyses = collectProcAnalyses(buf)
+  var fixed = initTable[SymId, FunctionSummary]()
+  var unresolvable = initHashSet[SymId]()
+  var mods = initTable[string, ForeignModule]()
+  var missing = initHashSet[string]()
+  var pending: seq[SymId] = @[]
+  for _, a in analyses:
+    for call in a.calls:
+      if not analyses.hasKey(call.callee):
+        pending.add call.callee
+  var loaded = 0
+  while pending.len > 0:
+    let sym = pending.pop()
+    if not analyses.hasKey(sym) and not fixed.hasKey(sym) and
+       sym notin unresolvable:
+      let modul = pool.symModule(sym)
+      let fm = if modul.len > 0: openForeignCnif(xnifDir, modul, mods, missing)
+               else: nil
+      let key = pool.symString(sym)
+      if fm != nil and fm.hasDecl(key):
+        let decl = fm.getDecl(key, globalTags, pool)
+        if decl.isTagLit and decl.stmtKind == ProcS:
+          var p = decl
+          let pd = takeProcDecl(p)
+          var stored = FunctionSummary()
+          let hasStored = readSummaryPragma(pd.pragmas, stored)
+          if isPureIntrinsicProc(pd.pragmas):
+            var pa = computeProcAnalysis(decl)
+            fixed[sym] = finalizeSummary(pa)
+          elif stored.noReturn or (hasStored and not stored.callsUnknown):
+            fixed[sym] = stored
+          elif pd.body.isTagLit and not isExternProc(pd.pragmas) and
+               loaded < MaxForeignSummaryProcs:
+            inc loaded
+            let fa = computeProcAnalysis(decl)
+            for call in fa.calls:
+              if not analyses.hasKey(call.callee) and
+                 not fixed.hasKey(call.callee) and
+                 call.callee notin unresolvable:
+                pending.add call.callee
+            analyses[sym] = fa
+          elif hasStored:
+            fixed[sym] = stored
+          else:
+            unresolvable.incl sym
+        else:
+          unresolvable.incl sym
+      else:
+        unresolvable.incl sym
+  result = resolveSummaries(analyses, fixed)
+  for k, v in fixed:
+    result[k] = v
 
 proc collectFunctionSummaries*(buf: var TokenBuf): FunctionSummaryTable =
   result = initTable[SymId, FunctionSummary]()
@@ -1109,6 +1220,20 @@ when isMainModule:
     doAssert paramMayWrite(s, 1)
     # Out-of-range stays conservative even with a marked param present.
     doAssert paramMayWrite(s, 2)
+
+  block noreturn_callee_does_not_poison_caller:
+    let t = moduleSummaries("""
+      (proc :myPanic.0 (params) . (pragmas (attr "noreturn")) (stmts
+        (call abort.0.ext)))
+      (proc :f.0 (params (param :obj.0 . . . .)) . . (stmts
+        (call myPanic.0)
+        (ret (dot obj.0 fld.0))))""")
+    let s = t.getOrQuit(pool.symId("f.0"))
+    doAssert not s.callsUnknown
+    doAssert not s.writesGlobal
+    doAssert s.params[0].reads
+    doAssert not s.params[0].writes
+    doAssert isReadOnly(s)
 
   block instr_is_conservative_not_readonly:
     let t = moduleSummaries("""

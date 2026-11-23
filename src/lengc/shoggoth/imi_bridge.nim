@@ -15,8 +15,10 @@
 ## `TokenBuf` itself crosses, interned in nifpools' global pools, and
 ## `optdriver` builds its type context on those same pools.
 
+import std / tables
 include "../../lib" / nifprelude
-import ".." / ".." / hexer / inliner
+import ".." / ".." / hexer / [inliner, funcsummary]
+from cse import nil
 
 proc parseModule*(input: string): TokenBuf =
   ## Parse the `.c.nif` at `input` into nifpools' global pools, with dense line
@@ -33,3 +35,21 @@ proc runImiOn*(buf: var TokenBuf; suffix, xnifDir: string): bool =
   ## Inter-module inlining on a module already parsed with `parseModule` (and
   ## possibly rewritten since); true when the inliner altered anything.
   inlineModule(buf, suffix, shoggothStage, xnifDir)
+
+proc resolveSummariesFor*(buf: var TokenBuf;
+                          xnifDir: string): cse.FunctionSummaryTable =
+  ## Refresh `buf`'s proc summaries post-inlining and refine cross-module
+  ## callees from `.c.nif` files in `xnifDir`, returning a `cse`-typed table.
+  let raw = resolveModuleSummaries(buf, xnifDir)
+  result = initTable[SymId, cse.FunctionSummary]()
+  for sym, s in raw:
+    var params = newSeq[cse.ParamEffect](s.params.len)
+    for i, p in s.params:
+      params[i] = cse.ParamEffect(
+        cls: p.cls, reads: p.reads, writes: p.writes,
+        slotWritten: p.slotWritten, escapes: p.escapes, constRef: p.constRef)
+    result[sym] = cse.FunctionSummary(
+      writesGlobal: s.writesGlobal, readsGlobal: s.readsGlobal,
+      callsUnknown: s.callsUnknown, raises: s.raises, noReturn: s.noReturn,
+      resultCls: s.resultCls, resultEscapes: s.resultEscapes,
+      params: ensureMove(params))

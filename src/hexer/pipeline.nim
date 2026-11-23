@@ -157,5 +157,5 @@ proc optimizeLengOutput*(buf: var TokenBuf; moduleSuffix: string; bits: int) =
   ## has emitted the final Lengc module, so they never see pre-Leng constructs
   ## such as try/finally.
   runArcopt(buf, moduleSuffix, bits)
-  annotateFunctionSummaries(buf)
   discard inlineModule(buf, moduleSuffix, hexerStage)
+  annotateFunctionSummaries(buf)

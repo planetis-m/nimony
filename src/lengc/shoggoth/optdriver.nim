@@ -331,14 +331,16 @@ proc rebuildTree(dest: var TokenBuf; n: var Cursor; suffix: string; st: var Stat
 
 proc optimizeModule*(src: var TokenBuf; suffix: string; st: var Stats;
                      m: ptr MainModule = nil; eng: Engine = nil;
-                     target = Target(mem: MemOpts(intrinsics: true))): TokenBuf =
+                     target = Target(mem: MemOpts(intrinsics: true));
+                     xnifDir = ""): TokenBuf =
   ## Rebuild the single module-level root tree (`(stmts …)`), optimizing bodies.
   ## `m` is the module type context for the alias pass (nil ⇒ coarse aliasing);
   ## `eng` the structural rewrite engine (nil ⇒ the rewriter stage is skipped);
   ## `target.vecMode` enables the 128-bit loop vectorizer: `vecNeon` on native
   ## AArch64, `vecSse` on native x86-64. Both emit the same target-neutral rows
   ## today; the mode names the back end that lowers them.
-  var summaries = collectFunctionSummaries(src)   # once per module; cse runs per body
+  var summaries = if xnifDir.len > 0: resolveSummariesFor(src, xnifDir)
+                  else: collectFunctionSummaries(src)   # once per module; passes run per body
   result = createTokenBuf(src.len + src.len div 8, src.pool, src.tags)
   var n = src.beginRead()
   if n.kind == TagLit and n.stmtKind == StmtsS:
@@ -419,7 +421,8 @@ proc processFile*(input, output: string; verify = false;
   while d.hasMore:
     typeCtx.registerProcDecl(d)
     skip d
-  var optimized = optimizeModule(src, suffix, st, addr typeCtx, eng, target)
+  var optimized = optimizeModule(src, suffix, st, addr typeCtx, eng, target,
+                                 xnifDir = splitFile(input).dir)
   checkWellFormed(optimized)
   onRaiseQuit writeFile(output, toModuleString(optimized, "." & extractModuleSuffix(output)))
   onRaiseQuit writeLengInterface(optimized, output)
