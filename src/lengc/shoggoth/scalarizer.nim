@@ -187,6 +187,10 @@ proc runConstructorProjection*(buf: var TokenBuf): bool {.discardable.} =
 
 # ---- context --------------------------------------------------------------
 
+const
+  MaxArrayLen = 8                      ## Maximum fixed-size array length for SROA.
+  ZeroInitTypes = {IT, UT, FT, CT, BoolT, PtrT, AptrT, ProctypeT, ArrayT}
+
 type
   InitKind = enum
     ikCtor                             ## `var o = (oconstr T (kv f v)…)`
@@ -217,6 +221,7 @@ type
                                        ## type slot (-1 ⇒ absent); `lookupField` resolves each
                                        ## scalar's declared type through it
     init: InitKind
+    arrayLen: int                      ## 0 for objects; 1..MaxArrayLen for fixed-size arrays
     loadPos: int                       ## ikLoad: position of `L`, else -1
     fieldOrder: seq[SymId]             ## the fields that get a scalar, in emission order
     valuePos: Table[SymId, int]        ## field -> position of its `kv` value (ikCtor)
@@ -269,10 +274,43 @@ proc cand(c: var Context; s: SymId): var Candidate {.inline.} =
 proc isSurvivor(c: var Context; s: SymId): bool =
   s != SymId(0) and s in c.candidates and c.cand(s).names.len > 0
 
+proc elemKey(index: int): SymId {.inline.} = SymId(uint32(index + 1))
+proc elemIndex(slot: SymId): int {.inline.} = int(uint32(slot)) - 1
+
+proc literalBound(cursor: Cursor; limit: int): int =
+  ## Non-negative literal in `0..limit` (unwrapping `suf`), or -1.
+  let value = if cursor.kind == TagLit and cursor.exprKind == SufC: child0(cursor) else: cursor
+  let number = if value.kind == IntLit: intVal(value)
+               elif value.kind == UIntLit and uintVal(value) <= uint64(limit): int64(uintVal(value))
+               elif value.kind == CharLit: int64(ord(value.charLit))
+               else: -1'i64
+  result = if number >= 0 and number <= limit: int(number) else: -1
+
+proc arrayBody(c: var Context; typePos: int): Cursor =
+  ## Resolved `(array T N)` type cursor at `typePos`, or nil.
+  result = default(Cursor)
+  if typePos < 0: return
+  let typeCursor = cursorAt(c.orig[], typePos)
+  if c.m != nil and isImportC(c.m[], typeCursor): return
+  let body = if c.m != nil: navigateToObjectBody(c.m[], typeCursor) else: typeCursor
+  if body.kind == TagLit and body.typeKind == ArrayT: result = body
+
+proc arrayLength(c: var Context; typePos: int): int =
+  ## Fixed-size array length in `1..MaxArrayLen` with sized elements, or 0.
+  result = 0
+  let body = arrayBody(c, typePos)
+  if cursorIsNil(body): return
+  let elementType = child0(body)
+  var lengthCursor = elementType
+  skip lengthCursor
+  if lengthCursor.kind notin {IntLit, UIntLit}: return
+  let length = literalBound(lengthCursor, MaxArrayLen)
+  if length >= 1 and (c.m == nil or not isZeroSized(c.m[], elementType)): result = length
+
 # ---- candidate collection -------------------------------------------------
 
-proc newCandidate(declPos, typePos: int; init: InitKind; loadPos = -1): Candidate =
-  Candidate(declPos: declPos, typePos: typePos, init: init, loadPos: loadPos,
+proc newCandidate(declPos, typePos: int; init: InitKind; loadPos = -1; arrayLen = 0): Candidate =
+  Candidate(declPos: declPos, typePos: typePos, init: init, arrayLen: arrayLen, loadPos: loadPos,
             valuePos: initTable[SymId, int](),
             names: initTable[SymId, string](),
             dotPos: initTable[SymId, int](),
@@ -317,11 +355,35 @@ proc readKvs(c: var Context; oconstr: Cursor; order: var seq[SymId];
         result = false                           # base part / stray child → bail
         skip oc
 
+proc readCtor(c: var Context; ctor: Cursor; typePos, arrayLen: int;
+              order: var seq[SymId]; values: var Table[SymId, int]): bool =
+  ## Collect `oconstr`/`aconstr` slots (using `-1` for all-zero `aconstr`).
+  if arrayLen == 0: return readKvs(c, ctor, order, values) and order.len > 0
+  var cursor = ctor
+  cursor.into:
+    if cursor.hasMore: skip cursor
+    while cursor.hasMore:
+      let slot = elemKey(order.len)
+      order.add slot
+      values[slot] = cursorToPosition(c.orig[], cursor)
+      skip cursor
+  if order.len == arrayLen: return true
+  let elementType = child0(arrayBody(c, typePos))
+  let resolved = if c.m != nil: navigateToObjectBody(c.m[], elementType) else: elementType
+  if order.len == 0 and resolved.typeKind in ZeroInitTypes:
+    for index in 0 ..< arrayLen:
+      order.add elemKey(index)
+      values[elemKey(index)] = -1
+    return true
+  result = false
+
 proc recordOconstr(c: var Context; oSym: SymId; declPos: int; oconstr: Cursor) =
-  ## Record `var oSym = (oconstr T (kv f v)…)` as a candidate. Bails (records
-  ## nothing) on a base/inheritance part or a malformed `kv`.
-  var cand = newCandidate(declPos, cursorToPosition(c.orig[], child0(oconstr)), ikCtor)
-  if readKvs(c, oconstr, cand.fieldOrder, cand.valuePos) and cand.fieldOrder.len > 0:
+  ## Record `var oSym = (oconstr T (kv f v)…)` or `(aconstr T …)` as a candidate.
+  let typePos = cursorToPosition(c.orig[], child0(oconstr))
+  let arrayLen = if oconstr.exprKind == AconstrC: arrayLength(c, typePos) else: 0
+  if oconstr.exprKind == AconstrC and arrayLen == 0: return
+  var cand = newCandidate(declPos, typePos, ikCtor, arrayLen = arrayLen)
+  if readCtor(c, oconstr, typePos, arrayLen, cand.fieldOrder, cand.valuePos):
     addCandidate(c, oSym, cand)
 
 proc isPureLvaluePath(n: Cursor): bool =
@@ -362,7 +424,7 @@ proc recordDecl(c: var Context; n: Cursor) =
       if not (v.kind == DotToken): declTypePos = cursorToPosition(c.orig[], v)
       skip v                                   # type
     if v.hasMore:
-      if v.kind == TagLit and v.exprKind == OconstrC:
+      if v.kind == TagLit and v.exprKind in {OconstrC, AconstrC}:
         init = ikCtor; known = true
         oconstrCur = v
       elif declTypePos >= 0 and (
@@ -382,8 +444,9 @@ proc recordDecl(c: var Context; n: Cursor) =
     let declPos = cursorToPosition(c.orig[], n)
     case init
     of ikCtor: recordOconstr(c, oSym, declPos, oconstrCur)
-    of ikLoad: addCandidate(c, oSym, newCandidate(declPos, declTypePos, ikLoad, loadPos))
-    of ikNone: addCandidate(c, oSym, newCandidate(declPos, declTypePos, ikNone))
+    of ikLoad, ikNone:
+      addCandidate(c, oSym, newCandidate(declPos, declTypePos, init, loadPos,
+                                         arrayLength(c, declTypePos)))
 
 # ---- legality / use classification ---------------------------------------
 
@@ -441,33 +504,39 @@ proc classifyOperand(c: var Context; n: Cursor; stmtPos: int; owner: SymId) =
   else:
     classify(c, n, stmtPos, owner)
 
-proc noteAccess(c: var Context; dot: Cursor; oSym, owner: SymId; isRead: bool) =
-  var f = child0(dot)
-  skip f
-  if f.kind == Symbol:
-    let fSym = symId(f)
+proc accessSlot(c: var Context; n: Cursor; baseSym: SymId): SymId =
+  ## Field or encoded array-element slot for `(dot base f)` / `(at base K)`, or 0.
+  var selector = child0(n)
+  skip selector
+  let arrayLen = c.cand(baseSym).arrayLen
+  if n.exprKind == DotC and arrayLen == 0 and selector.kind == Symbol: return symId(selector)
+  if n.exprKind == AtC and arrayLen > 0 and selector.hasMore:
+    let index = literalBound(selector, arrayLen - 1)
+    if index >= 0: return elemKey(index)
+  result = SymId(0)
+
+proc noteAccess(c: var Context; dot: Cursor; oSym, owner: SymId; isRead: bool): bool =
+  let fSym = accessSlot(c, dot, oSym)
+  result = fSym != SymId(0)
+  if result:
     let at = cursorToPosition(c.orig[], dot)
     touch(c, oSym)
     if oSym == owner: c.cand(oSym).selfDef = true   # `o = T(a: o.b, …)`
     if fSym notin c.cand(oSym).accessed:
       c.cand(oSym).accessOrder.add fSym
-      c.cand(oSym).dotPos[fSym] = at
+      if c.cand(oSym).arrayLen == 0: c.cand(oSym).dotPos[fSym] = at
     c.cand(oSym).accessed.incl fSym
     if isRead:
       let reads = c.cand(oSym).fieldReads + 1
       c.cand(oSym).fieldReads = reads
     c.accesses.add (oSym, fSym, at)
-  else:
-    c.cand(oSym).disqualified = true                 # `o.(weird)` → give up
 
 proc classifyTarget(c: var Context; n: Cursor; stmtPos: int; owner: SymId) =
   ## The storage spine of an assignment target: the candidate field it ends
   ## in is written, not read. Indices along the spine are read as usual.
   if n.kind == TagLit and n.exprKind in {DotC, AtC}:
     let base = child0(n)
-    if n.exprKind == DotC and isCandidateSym(c, base):
-      noteAccess(c, n, symId(base), owner, false)
-    else:
+    if not (isCandidateSym(c, base) and noteAccess(c, n, symId(base), owner, false)):
       var m = n
       m.into:
         if m.hasMore:
@@ -554,12 +623,17 @@ proc classify(c: var Context; n: Cursor; stmtPos: int; owner: SymId) =
       return
     else: discard
     case n.exprKind
-    of DotC:
+    of DotC, AtC:
       let base = child0(n)
-      if isCandidateSym(c, base):
-        noteAccess(c, n, symId(base), owner, true)
-      else:
-        classifyKids(c, n, stmtPos, owner)           # nested base (`o.a.b`, deref, …)
+      if not (isCandidateSym(c, base) and noteAccess(c, n, symId(base), owner, true)):
+        classifyKids(c, n, stmtPos, owner)           # nested base or dynamic index
+    of AconstrC:
+      var m = n
+      m.into:
+        if m.hasMore: skip m
+        while m.hasMore:
+          classifyValue(c, m, stmtPos, owner)
+          skip m
     of AddrC, HaddrC:
       let r = addrEscapeRoot(child0(n))              # `addr o` / `addr o.f` escapes o
       if r != SymId(0) and r in c.candidates:
@@ -588,12 +662,17 @@ proc classify(c: var Context; n: Cursor; stmtPos: int; owner: SymId) =
 
 # ---- legality -------------------------------------------------------------
 
-proc typeFields(c: var Context; typePos: int): seq[SymId] =
+proc typeFields(c: var Context; oSym: SymId): seq[SymId] =
   ## The fields of the object type at `typePos` in declaration order, or nothing
   ## unless it is a plain object: no base type, no union branch, no field
   ## pragma (a bit field's scalar would not truncate what is stored into it).
   ## Those are the types a total `oconstr` over the field scalars rebuilds.
   result = @[]
+  let arrayLen = c.cand(oSym).arrayLen
+  if arrayLen > 0:
+    for index in 0 ..< arrayLen: result.add elemKey(index)
+    return
+  let typePos = c.cand(oSym).typePos
   if typePos < 0: return
   let t = cursorAt(c.orig[], typePos)
   if c.m == nil:
@@ -626,7 +705,7 @@ proc sameFields(order: seq[SymId]; fields: seq[SymId]): bool =
     for f in order:
       if f notin fields: return false
 
-proc wholeDefOk(c: var Context; defPos: int; fields: seq[SymId]): bool =
+proc wholeDefOk(c: var Context; defPos: int; oSym: SymId; fields: seq[SymId]): bool =
   ## `(asgn o RHS)` decomposes into one assignment per field: RHS is a total
   ## `oconstr` or a pure lvalue. (That it does not read `o` itself is
   ## `selfDef`: the field assignments run one after another, and
@@ -635,10 +714,12 @@ proc wholeDefOk(c: var Context; defPos: int; fields: seq[SymId]): bool =
   var a = cursorAt(c.orig[], defPos)
   inc a                                              # into the asgn: the target
   skip a                                             # the value
-  if a.kind == TagLit and a.exprKind == OconstrC:
+  let arrayLen = c.cand(oSym).arrayLen
+  if a.kind == TagLit and a.exprKind == (if arrayLen > 0: AconstrC else: OconstrC):
     var order: seq[SymId] = @[]
     var values = initTable[SymId, int]()
-    result = readKvs(c, a, order, values) and sameFields(order, fields)
+    result = readCtor(c, a, c.cand(oSym).typePos, arrayLen, order, values) and
+             sameFields(order, fields)
   else:
     result = isPureLvaluePath(a)
 
@@ -661,14 +742,14 @@ proc wholeOk(c: var Context; oSym: SymId): bool =
   ## `oSym` is assigned or read as a whole: a scalar per field of its type,
   ## every access naming one of them, every whole assignment decomposable, a
   ## constructor initializer total. Fills in its `fieldOrder`.
-  let fields = typeFields(c, c.cand(oSym).typePos)
+  let fields = typeFields(c, oSym)
   result = fields.len > 0 and not c.cand(oSym).selfDef
   let accessed = c.cand(oSym).accessed
   for f in accessed:
     if f notin fields: result = false
   let defs = c.cand(oSym).defs
   for d in defs:
-    if result and not wholeDefOk(c, d, fields): result = false
+    if result and not wholeDefOk(c, d, oSym, fields): result = false
   if result:
     if c.cand(oSym).init == ikCtor:
       result = sameFields(c.cand(oSym).fieldOrder, fields)
@@ -689,9 +770,15 @@ proc emitRebuilt(c: var Context; dest: var TokenBuf; oSym: SymId) =
   ## The whole value of the scalarized `oSym`: `(oconstr T (kv f `sroa.f)…)`,
   ## total over the type's fields, as `oconstr` is.
   let typePos = c.cand(oSym).typePos
+  let fields = c.cand(oSym).fieldOrder
+  if c.cand(oSym).arrayLen > 0:
+    dest.openTag TagId(ord(AconstrTagId))
+    dest.addSubtree cursorAt(c.orig[], typePos)
+    for f in fields: dest.addSymUse c.cand(oSym).names.getOrQuit(f)
+    dest.closeTag()
+    return
   dest.openTag TagId(ord(OconstrTagId))
   dest.addSubtree cursorAt(c.orig[], typePos)
-  let fields = c.cand(oSym).fieldOrder
   for f in fields:
     dest.openTag TagId(ord(KvTagId))
     dest.addSymUse f
@@ -709,17 +796,40 @@ proc emitLoadBase(c: var Context; dest: var TokenBuf; src: Cursor) =
   else:
     emitRewritten(c, dest, src)
 
-proc emitField(c: var Context; dest: var TokenBuf; src: Cursor; f: SymId) =
+proc emitField(c: var Context; dest: var TokenBuf; src: Cursor; f: SymId; isArray = false) =
   ## `src.f`, for the pure lvalue `src`: the scalar itself when `src` is a
   ## scalarized object.
   if src.kind == Symbol and isSurvivor(c, symId(src)):
     dest.addSymUse c.cand(symId(src)).names.getOrQuit(f)
+  elif isArray:
+    dest.openTag TagId(ord(AtTagId))
+    emitLoadBase(c, dest, src)
+    dest.addIntLit elemIndex(f)
+    dest.closeTag()
   else:
     dest.openTag TagId(ord(DotTagId))
     emitLoadBase(c, dest, src)
     dest.addSymUse f
     dest.addIntLit 0                                 # inherited depth: a plain object
     dest.closeTag()
+
+proc emitZeroValue(c: var Context; dest: var TokenBuf; typePos: int) =
+  ## Emit a zero value for an element of the array type at `typePos`.
+  let elementType = child0(arrayBody(c, typePos))
+  let resolved = if c.m != nil: navigateToObjectBody(c.m[], elementType) else: elementType
+  case resolved.typeKind
+  of IT: dest.addIntLit 0
+  of UT: dest.addUIntLit 0'u64
+  of CT: dest.addCharLit '\0'
+  of FT: dest.addFloatLit 0.0
+  of BoolT:
+    dest.openTag TagId(ord(FalseTagId))
+    dest.closeTag()
+  of PtrT, AptrT, ProctypeT, ArrayT:
+    dest.openTag TagId(ord(if resolved.typeKind == ArrayT: AconstrTagId else: NilTagId))
+    dest.addSubtree elementType
+    dest.closeTag()
+  else: assert false
 
 proc emitRewritten(c: var Context; dest: var TokenBuf; n: Cursor) =
   ## Copy the subtree at `n` into `dest`, replacing every `(dot X f)` whose object
@@ -732,14 +842,13 @@ proc emitRewritten(c: var Context; dest: var TokenBuf; n: Cursor) =
     else:
       dest.addSubtree n
   elif n.kind == TagLit:
-    if n.exprKind == DotC:
+    if n.exprKind in {DotC, AtC}:
       let base = child0(n)
       if base.kind == Symbol and isSurvivor(c, symId(base)):
         let oSym = symId(base)
-        var f = base
-        skip f
-        if f.kind == Symbol and symId(f) in c.cand(oSym).names:
-          dest.addSymUse c.cand(oSym).names.getOrQuit(symId(f))
+        let fSym = accessSlot(c, n, oSym)
+        if fSym != SymId(0) and fSym in c.cand(oSym).names:
+          dest.addSymUse c.cand(oSym).names.getOrQuit(fSym)
           return
     let tag = n.cursorTagId
     let li = rawLineInfo(n)
@@ -753,7 +862,7 @@ proc emitRewritten(c: var Context; dest: var TokenBuf; n: Cursor) =
   else:
     dest.addSubtree n
 
-proc emitScalarType(c: var Context; buf: var TokenBuf; typePos: int; f: SymId) =
+proc emitScalarType(c: var Context; buf: var TokenBuf; typePos: int; f: SymId; isArray = false) =
   ## Spell out the scalar's declared type instead of leaving the slot empty for the
   ## backend to re-infer. The right type is the field's declared type in `T`, not the
   ## initializer's: the scalar stands in for every `o.f`, so it must have `o.f`'s type.
@@ -764,6 +873,8 @@ proc emitScalarType(c: var Context; buf: var TokenBuf; typePos: int; f: SymId) =
   ## close). Without a type context (the self-tests) the slot is left empty.
   if c.m == nil:
     buf.addDotToken()
+  elif isArray:
+    buf.addSubtree child0(arrayBody(c, typePos))
   else:
     assert typePos >= 0, "oconstr without a type"
     buf.addSubtree lookupField(c.m[], cursorAt(c.orig[], typePos), f)
@@ -786,10 +897,13 @@ proc buildFieldDecl(c: var Context; oSym, f: SymId): Cursor =
   var buf = openSynth(c, TagId(ord(VarTagId)), rawLineInfo(decl))
   buf.addSymDef c.cand(oSym).names.getOrQuit(f)
   buf.addDotToken()                                  # pragmas
-  emitScalarType(c, buf, c.cand(oSym).typePos, f)    # declared type
+  let isArray = c.cand(oSym).arrayLen > 0
+  emitScalarType(c, buf, c.cand(oSym).typePos, f, isArray)    # declared type
   case c.cand(oSym).init
   of ikCtor:
-    emitRewritten(c, buf, cursorAt(c.orig[], c.cand(oSym).valuePos.getOrQuit(f)))
+    let valuePos = c.cand(oSym).valuePos.getOrQuit(f)
+    if valuePos < 0: emitZeroValue(c, buf, c.cand(oSym).typePos)
+    else: emitRewritten(c, buf, cursorAt(c.orig[], valuePos))
   of ikLoad:
     let src = cursorAt(c.orig[], c.cand(oSym).loadPos)
     if f in c.cand(oSym).dotPos:
@@ -812,7 +926,7 @@ proc buildFieldDecl(c: var Context; oSym, f: SymId): Cursor =
             skip d
         buf.closeTag()
     else:
-      emitField(c, buf, src, f)
+      emitField(c, buf, src, f, isArray)
   of ikNone:
     buf.addDotToken()
   result = finishSynth(c, ensureMove(buf))
@@ -822,7 +936,8 @@ proc buildFieldAsgn(c: var Context; oSym, f: SymId; at: Cursor; value: Cursor;
   ## `(asgn `sroa.f V)`: `V` is `value` itself, or `value.f` when `project`.
   var buf = openSynth(c, TagId(ord(AsgnTagId)), rawLineInfo(at))
   buf.addSymUse c.cand(oSym).names.getOrQuit(f)
-  if project: emitField(c, buf, value, f)
+  if cursorIsNil(value): emitZeroValue(c, buf, c.cand(oSym).typePos)
+  elif project: emitField(c, buf, value, f, c.cand(oSym).arrayLen > 0)
   else: emitRewritten(c, buf, value)
   result = finishSynth(c, ensureMove(buf))
 
@@ -879,12 +994,14 @@ proc emitDef(c: var Context; oSym: SymId; defPos: int) =
   inc rhs
   skip rhs
   var stmts: seq[Cursor] = @[]
-  if rhs.kind == TagLit and rhs.exprKind == OconstrC:
+  if rhs.kind == TagLit and rhs.exprKind in {OconstrC, AconstrC}:
     var order: seq[SymId] = @[]
     var values = initTable[SymId, int]()
-    discard readKvs(c, rhs, order, values)
+    discard readCtor(c, rhs, c.cand(oSym).typePos, c.cand(oSym).arrayLen, order, values)
     for f in order:
-      stmts.add buildFieldAsgn(c, oSym, f, at, cursorAt(c.orig[], values.getOrQuit(f)), false)
+      let valuePos = values.getOrQuit(f)
+      stmts.add buildFieldAsgn(c, oSym, f, at,
+        (if valuePos < 0: default(Cursor) else: cursorAt(c.orig[], valuePos)), false)
   else:
     let fields = c.cand(oSym).fieldOrder
     bindBase(c, c.cand(oSym).typePos, rhs, at, fields.len, stmts)
@@ -922,7 +1039,8 @@ proc emitRead(c: var Context; r: WholeRead) =
 # ---- public entry ---------------------------------------------------------
 
 proc scalarize(buf: var TokenBuf; m: ptr MainModule; temps: var int;
-               knownFields: Table[SymId, seq[SymId]]): bool =
+               knownFields: Table[SymId, seq[SymId]];
+               arraysSplit: ptr int = nil): bool =
   result = false
   var c = Context(orig: addr buf,
                   candidates: initTable[SymId, Candidate](),
@@ -1006,6 +1124,7 @@ proc scalarize(buf: var TokenBuf; m: ptr MainModule; temps: var int;
   # Assign scalar names in source order (deterministic output / codegen).
   for it in survPairs:
     let oSym = it[1]
+    if arraysSplit != nil and c.cand(oSym).arrayLen > 0: inc arraysSplit[]
     let fields = c.cand(oSym).fieldOrder
     for f in fields:
       let nm = freshScalarName(c)
@@ -1049,7 +1168,8 @@ proc scalarize(buf: var TokenBuf; m: ptr MainModule; temps: var int;
     buf = ensureMove(nb)
     result = true
 
-proc runScalarize*(buf: var TokenBuf; m: ptr MainModule; temps: var int): bool {.discardable.} =
+proc runScalarize*(buf: var TokenBuf; m: ptr MainModule; temps: var int;
+                   arraysSplit: ptr int = nil): bool {.discardable.} =
   ## Scalar-replace non-escaping local objects in a single proc body. Names the
   ## field scalars `` `sroa.<n> ``, which are locals of that body.
   ## `m` is the module type context each scalar's declared type is resolved through;
@@ -1057,7 +1177,7 @@ proc runScalarize*(buf: var TokenBuf; m: ptr MainModule; temps: var int): bool {
   ## `temps` is the body's `` `sroa `` counter: a body the pipeline scalarizes
   ## again must not mint a name the previous round already declared.
   ## Returns whether it changed `buf`.
-  result = scalarize(buf, m, temps, initTable[SymId, seq[SymId]]())
+  result = scalarize(buf, m, temps, initTable[SymId, seq[SymId]](), arraysSplit)
 
 # ---- self-tests -----------------------------------------------------------
 
@@ -1356,5 +1476,45 @@ when isMainModule:
     assertUnchangedV(
       "(stmts (var :o.0.M . V.0.M .) (asgn o.0.M (call mk.0.M)) " &
       "(asgn r.0.M (dot o.0.M x.0.M 0)))")
+
+  # ---- small fixed-size arrays -------------------------------------------
+
+  const arr4 = "(var :a.0.M . (array (i 64) 4) (aconstr (array (i 64) 4) 1 2 3 4)) "
+
+  block array_literal_and_zero_split:
+    chk(
+      "(stmts " & arr4 & "(asgn (at a.0.M 1) 9) (asgn x.0.M (at a.0.M 0)) (asgn y.0.M (at a.0.M 1)))",
+      "(stmts (var :`sroa.1 . . 1) (var :`sroa.2 . . 2) (var :`sroa.3 . . 3) " &
+      "(var :`sroa.4 . . 4) (asgn `sroa.2 9) (asgn x.0.M `sroa.1) (asgn y.0.M `sroa.2))")
+    chk(
+      "(stmts (var :a.0.M . (array (i 64) 2) (aconstr (array (i 64) 2))) (asgn x.0.M (at a.0.M 1)))",
+      "(stmts (var :`sroa.1 . . 0) (var :`sroa.2 . . 0) (asgn x.0.M `sroa.2))")
+
+  block array_disqualified_cases_unchanged:
+    assertUnchanged("(stmts " & arr4 & "(asgn x.0.M (at a.0.M i.0.M)))")
+    assertUnchanged("(stmts " & arr4 & "(call use.0.M (addr (at a.0.M 0))))")
+    assertUnchanged("(stmts " & arr4 & "(asgn x.0.M (at a.0.M 4)))")
+    assertUnchanged(
+      "(stmts (var :a.0.M . (array (i 64) 9) (aconstr (array (i 64) 9) 1 2 3 4 5 6 7 8 9)) " &
+      "(asgn x.0.M (at a.0.M 0)))")
+
+  block array_whole_copy_loop_and_nested:
+    chk(
+      "(stmts (var :a.0.M . (array (i 64) 2) src.0.M) " &
+      "(loop (stmts (asgn (at a.0.M 0) (at a.0.M 1)) (continue c.0.M))) (ret a.0.M))",
+      "(stmts (var :`sroa.1 . . (at src.0.M 0)) (var :`sroa.2 . . (at src.0.M 1)) " &
+      "(loop (stmts (asgn `sroa.1 `sroa.2) (continue c.0.M))) " &
+      "(var :`sroa.3 . (array (i 64) 2) (aconstr (array (i 64) 2) `sroa.1 `sroa.2)) (ret `sroa.3))")
+    var buf = parse(
+      "(stmts (var :m.0.M . (array (array (i 64) 2) 2) " &
+      "(aconstr (array (array (i 64) 2) 2) (aconstr (array (i 64) 2) 1 2) " &
+      "(aconstr (array (i 64) 2) 3 4))) (asgn r.0.M (at (at m.0.M 1) 0)))")
+    var temps = 0
+    doAssert runScalarize(buf, nil, temps)
+    doAssert runScalarize(buf, nil, temps)
+    let want = canon(
+      "(stmts (var :`sroa.3 . . 1) (var :`sroa.4 . . 2) " &
+      "(var :`sroa.5 . . 3) (var :`sroa.6 . . 4) (asgn r.0.M `sroa.5))")
+    doAssert toString(buf) == want, "MISMATCH\n  got:  " & toString(buf) & "\n  want: " & want
 
   echo "scalarizer.nim: all self-tests passed"

@@ -166,6 +166,7 @@ proc runOne(input, output: string; verify, stats: bool; target: Target) =
   if stats:
     var parts: seq[string] = @[]
     if st.intermodChanged > 0: parts.add "inliner=" & $st.intermodChanged
+    if st.sroaArrays > 0: parts.add "sroaArrays=" & $st.sroaArrays
     if st.cunrollTried > 0:
       parts.add "cunroll=" & $st.cunrollKept & "/" & $st.cunrollTried
     echo "  ", extractFilename(input), ": ", st.procs, " procs, ",

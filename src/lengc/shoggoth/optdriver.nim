@@ -90,6 +90,7 @@ type
     procs*, bodies*, intermodChanged*: int
     checksRemoved*: int
     vectorized*: int
+    sroaArrays*: int
     cunrollTried*, cunrollKept*: int
     memOps*: set[IntrinsicOp]                 ## the mem rows memidioms emitted
 
@@ -132,12 +133,13 @@ type
       ## declares a name an earlier round already declared.
 
 const
-  IdempotentStages = {stRewrite, stCtorProj, stScalarize, stUnswitch, stRefold, stCse}
+  IdempotentStages = {stRewrite, stCtorProj, stUnswitch, stRefold, stCse}
     ## Stages whose run on their own output is a no-op, so they are skipped
     ## when nothing changed the body since. The rewriter and unswitching are
-    ## fixpoints themselves. Copy propagation is the exception: one run deletes
-    ## only the last link of a dead-store chain (`x = bytes and 255` over
-    ## `bytes = b.bytes`), so it runs every round.
+    ## fixpoints themselves. Copy propagation and scalarization are the
+    ## exceptions: copyprop peels dead-store chains and scalarize peels one
+    ## aggregate layer per run (nested objects / arrays of arrays / objects
+    ## holding arrays), so both re-run when they mutated the body.
 
 proc mutated(f: var Fixpoint) {.inline.} =
   ## The body changed: every stage has something new to look at.
@@ -146,10 +148,13 @@ proc mutated(f: var Fixpoint) {.inline.} =
 
 template stage(f: var Fixpoint; s: CleanupStage; enabled: bool; pass: untyped) =
   ## Runs `pass`, which returns whether it changed the body, unless the stage
-  ## is idempotent and the body is still what its last run left behind.
+  ## is clean for the current body.
   if enabled and s notin f.clean:
-    if pass: mutated(f)
-    if s in IdempotentStages: f.clean.incl s
+    if pass:
+      mutated(f)
+      if s in IdempotentStages: f.clean.incl s
+    else:
+      f.clean.incl s
 
 proc runPipelineRound(buf: var TokenBuf; f: var Fixpoint; st: var Stats;
                       summaries: ptr FunctionSummaryTable; m: ptr MainModule;
@@ -164,7 +169,8 @@ proc runPipelineRound(buf: var TokenBuf; f: var Fixpoint; st: var Stats;
   let rw = eng != nil and passOn("rewrite")
   stage(f, stRewrite, rw): runRewritesFix(eng, buf) > 0
   stage(f, stCtorProj, passOn("ctorproj")): runConstructorProjection(buf)
-  stage(f, stScalarize, passOn("scalarize")): runScalarize(buf, m, f.sroa)
+  stage(f, stScalarize, passOn("scalarize")):
+    runScalarize(buf, m, f.sroa, addr st.sroaArrays)
   stage(f, stCopyProp, passOn("copyprop")): runCopyProp(buf, params, summaries, m)
   stage(f, stUnswitch, passOn("unswitch")): runUnswitch(buf, f.us) > 0
   # Copy propagation and unswitching substitute values into expressions;
