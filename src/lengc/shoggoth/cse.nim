@@ -1074,6 +1074,38 @@ proc resolveCallee*(r: var SummaryResolver; key: SymId;
   summary = s
   result = true
 
+type
+  CallArgEffects = object
+    argSyms: seq[SymId]
+    argPaths: seq[AccessPath]
+    escapedSyms: seq[SymId]
+    writtenClasses: HashSet[uint32]
+
+proc scanCallArgs(call: Cursor; summary: FunctionSummary;
+                  collectDetails: bool): CallArgEffects =
+  ## Single argument walk shared by `callIsEffectFree`, `invalidateForCall`,
+  ## and `callWouldClobber`: collects written summary partition classes plus
+  ## (when `collectDetails`) per-actual roots, access paths, and escaping roots.
+  result = CallArgEffects(writtenClasses: initHashSet[uint32]())
+  var argIndex = 0
+  var ca = call
+  ca.into:
+    if ca.hasMore: skip ca                     # callee
+    while ca.hasMore:
+      if collectDetails:
+        let s = rootOf(ca)
+        result.argSyms.add s
+        result.argPaths.add pathOfLvalue(ca)   # `(haddr x.f)` ⇒ the path `x.f`
+        if s != SymId(0) and argIndex < summary.params.len and
+           summary.params[argIndex].escapes:
+          result.escapedSyms.add s
+      if paramMayWrite(summary, argIndex):
+        let cls = if argIndex < summary.params.len: summary.params[argIndex].cls
+                  else: uint32(argIndex)       # varargs actual: its own synthetic class
+        result.writtenClasses.incl cls
+      skip ca
+      inc argIndex
+
 proc callIsEffectFree*(r: var SummaryResolver; call: Cursor;
                        isNoReturn: var bool): bool =
   ## True when `call`'s summary proves it cannot mutate caller-observable
@@ -1090,15 +1122,8 @@ proc callIsEffectFree*(r: var SummaryResolver; call: Cursor;
     isNoReturn = true
     return true
   if s.writesGlobal or s.callsUnknown: return false
-  var ca = call
-  var idx = 0
-  result = true
-  ca.into:
-    if ca.hasMore: skip ca                     # past callee
-    while ca.hasMore:
-      if paramMayWrite(s, idx): result = false
-      skip ca
-      inc idx
+  let eff = scanCallArgs(call, s, collectDetails = false)
+  result = eff.writtenClasses.len == 0
 
 proc callIsEffectFree*(r: var SummaryResolver; call: Cursor): bool =
   var noRet = false
@@ -1146,30 +1171,12 @@ proc invalidateForCall(c: var Context; call: Cursor) =
     return
 
   # Pass 1: per-actual root symbol, the partition classes the callee may write,
-  # and mark escaping pointer args as addr-taken. Iterate with `into` so the
-  # scope is bounded to the call's own children (nifcore has no ParRi).
-  var argSyms: seq[SymId] = @[]
-  var argPaths: seq[AccessPath] = @[]
-  var writtenClasses = initHashSet[uint32]()
-  var argIndex = 0
-  var ca = call
-  ca.into:
-    if ca.hasMore: skip ca         # callee
-    while ca.hasMore:
-      let s = rootOf(ca)
-      argSyms.add s
-      argPaths.add pathOfLvalue(ca)   # `(haddr x.f)` ⇒ the path `x.f`
-      if s != SymId(0) and argIndex < summary.params.len and
-         summary.params[argIndex].escapes:
-        markAddrTaken(c, s)
-      if paramMayWrite(summary, argIndex):
-        let cls = if argIndex < summary.params.len: summary.params[argIndex].cls
-                  else: uint32(argIndex)  # varargs actual: its own synthetic class
-        writtenClasses.incl cls
-      skip ca
-      inc argIndex
+  # and mark escaping pointer args as addr-taken.
+  let eff = scanCallArgs(call, summary, collectDetails = true)
+  for s in eff.escapedSyms:
+    markAddrTaken(c, s)
 
-  if writtenClasses.len == 0:
+  if eff.writtenClasses.len == 0:
     return                       # provably read-only call: the cache survives
 
   # Pass 2: clobbered = the *alias classes* (intra-proc) of the written actuals
@@ -1177,11 +1184,11 @@ proc invalidateForCall(c: var Context; call: Cursor) =
   # any escaped symbol. Using the class (not just the actual symbol) closes the
   # gap where a cached load is rooted at a local that aliases the actual.
   var reps = c.escaped
-  for i in 0 ..< argSyms.len:
-    if argSyms[i] == SymId(0): continue
-    let cls = if i < summary.params.len: summary.params[i].cls else: uint32(i)
-    if cls in writtenClasses:
-      reps.incl c.aa.find(argSyms[i])
+  for i in 0 ..< eff.argSyms.len:
+    if eff.argSyms[i] != SymId(0):
+      let cls = if i < summary.params.len: summary.params[i].cls else: uint32(i)
+      if cls in eff.writtenClasses:
+        reps.incl c.aa.find(eff.argSyms[i])
   when PathCallInvalidation:
     # The same summary, read as paths: which arguments the callee may write.
     # A parameter the callee placed in a written partition class counts too —
@@ -1189,9 +1196,9 @@ proc invalidateForCall(c: var Context; call: Cursor) =
     # the job it is actually good at (relating parameters to each other), while
     # the paths decide what in this body those arguments can reach.
     var written: seq[AccessPath] = @[]
-    for i in 0 ..< argPaths.len:
+    for i in 0 ..< eff.argPaths.len:
       let cls = if i < summary.params.len: summary.params[i].cls else: uint32(i)
-      if cls in writtenClasses: written.add argPaths[i]
+      if cls in eff.writtenClasses: written.add eff.argPaths[i]
     clobberForCall(c, written, reps)
   else:
     clobberClasses(c, reps)
@@ -1235,37 +1242,21 @@ proc callWouldClobber(c: var Context; call, expr: Cursor): bool =
   if summary.noReturn: return false
   if summary.writesGlobal or summary.callsUnknown:
     return not unreachableByCallee(c, expr)
-  var argSyms: seq[SymId] = @[]
-  var argPaths: seq[AccessPath] = @[]
-  var writtenClasses = initHashSet[uint32]()
-  var argIndex = 0
-  var ca = call
-  ca.into:
-    if ca.hasMore: skip ca
-    while ca.hasMore:
-      let s = rootOf(ca)
-      argSyms.add s
-      argPaths.add pathOfLvalue(ca)
-      if paramMayWrite(summary, argIndex):
-        let cls = if argIndex < summary.params.len: summary.params[argIndex].cls
-                  else: uint32(argIndex)
-        writtenClasses.incl cls
-      skip ca
-      inc argIndex
-  if writtenClasses.len == 0: return false
+  let eff = scanCallArgs(call, summary, collectDetails = true)
+  if eff.writtenClasses.len == 0: return false
   var reps = c.escaped
-  for i in 0 ..< argSyms.len:
-    if argSyms[i] == SymId(0): continue
-    let cls = if i < summary.params.len: summary.params[i].cls else: uint32(i)
-    if cls in writtenClasses:
-      reps.incl c.aa.find(argSyms[i])
+  for i in 0 ..< eff.argSyms.len:
+    if eff.argSyms[i] != SymId(0):
+      let cls = if i < summary.params.len: summary.params[i].cls else: uint32(i)
+      if cls in eff.writtenClasses:
+        reps.incl c.aa.find(eff.argSyms[i])
   when PathCallInvalidation:
     # Hoisting must ask the question invalidation asks, or LICM would leave a
     # load in the loop that the cache would have kept across the same call.
     var written: seq[AccessPath] = @[]
-    for i in 0 ..< argPaths.len:
+    for i in 0 ..< eff.argPaths.len:
       let cls = if i < summary.params.len: summary.params[i].cls else: uint32(i)
-      if cls in writtenClasses: written.add argPaths[i]
+      if cls in eff.writtenClasses: written.add eff.argPaths[i]
     result = callClobbersEntry(c, expr, written, reps)
   else:
     result = expressionTouchesClass(c, expr, reps)
