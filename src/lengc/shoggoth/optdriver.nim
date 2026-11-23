@@ -160,7 +160,7 @@ proc runPipelineRound(buf: var TokenBuf; f: var Fixpoint; st: var Stats;
   stage(f, stCtorProj, passOn("ctorproj")): runConstructorProjection(buf)
   stage(f, stScalarize, passOn("scalarize")): runScalarize(buf, m, f.sroa)
   stage(f, stCopyProp, passOn("copyprop")): runCopyProp(buf, params, summaries, m)
-  stage(f, stUnswitch, passOn("unswitch")): runUnswitch(buf, f.us) > 0
+  stage(f, stUnswitch, passOn("unswitch")): runUnswitch(buf, f.us, summaries, m) > 0
   # Copy propagation and unswitching substitute values into expressions;
   # `(add T x 0)` and `(lt 14 14)` that only now became foldable fold here,
   # before CSE keys on them.
@@ -212,7 +212,8 @@ proc optimizeBody(buf: var TokenBuf; suffix: string; st: var Stats;
   # `` `x = haddr (pat `iv.q `iv.j) `` is a binding copy propagation can
   # substitute into `(deref `x)` and the rewriter then folds — so the fixpoint
   # resumes when it changed anything.
-  if passOn("indvars") and runInductionVariables(buf, m, target.scaledIndex, f.iv):
+  if passOn("indvars") and
+     runInductionVariables(buf, m, target.scaledIndex, f.iv, summaries):
     mutated(f)
     cleanupFixpoint(buf, f, st, summaries, m, params, eng)
   # `target.mem.mergeWordBytes` enables merging adjacent constant field

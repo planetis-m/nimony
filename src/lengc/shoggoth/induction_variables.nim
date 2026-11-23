@@ -22,6 +22,7 @@ import patchsets
 
 include ".." / ".." / "lib" / compat2   # getOrQuit (host Nim)
 import ".." / nifmodules                      # MainModule (type context, threaded through)
+import cse                                    # SummaryResolver, FunctionSummaryTable
 import intrinsiceffects                       # is this `(instr …)` a pure value?
 import ".." / typenav                         # getNominalType — the temp's declared type
 import countedloops                           # detectLoop: the count-to-zero form
@@ -45,14 +46,17 @@ type
     m: ptr MainModule  ## module type context; nil ⇒ emit `.` and let the backend
                        ## re-infer (what the self-tests, which parse a body in
                        ## isolation, still do)
+    resolver: SummaryResolver
 
 proc createContext(orig: ptr TokenBuf;
-                   m: ptr MainModule; scaledIndex: bool): Context =
+                   m: ptr MainModule; scaledIndex: bool;
+                   summaries: ptr FunctionSummaryTable): Context =
   Context(orig: orig, scaledIndex: scaledIndex,
           patchset: initPatchset(orig),
           synth: @[],
           tempCounter: 0,
-          m: m)
+          m: m,
+          resolver: initSummaryResolver(summaries, m))
 
 proc freshTempName(c: var Context; role = "p"): string =
   inc c.tempCounter
@@ -180,6 +184,12 @@ type
     ptrStoreTargets: seq[string] ## per store through a pointer: the pointer it
                                  ## writes through (`treeKey`), "" if unknown
     hasCall: bool              ## a callee can rebind a global or an escaped local
+    firstNoReturnPos: int      ## earliest `noreturn` call in the loop (`high(int)`
+                               ## if none): a `(deref p)` after it must not hoist
+                               ## ahead of a guard like `if p == nil: panic()`
+    sawExit: bool              ## saw `break`/`ret`/`raise`/`jmp`/`noreturn` so far
+    derefedSafe: HashSet[SymId] ## pointers already dereferenced unconditionally
+                                ## before any exit (e.g. a bounds guard's `s.len`)
     m: ptr MainModule          ## to ask a row whether an `(instr …)` is pure;
                                ## nil ⇒ every intrinsic counts as a call
 
@@ -229,8 +239,12 @@ proc pointerKey(lhs: Cursor): string =
       else: done = true
     else: done = true
 
-proc collectLoopFacts(n: Cursor; f: var LoopFacts) =
+proc collectLoopFacts(c: var Context; n: Cursor; f: var LoopFacts;
+                      uncond = true) =
   if not n.hasMore or n.kind != TagLit: return
+  if uncond and not f.sawExit and n.exprKind == DerefC and
+     n.childCursor.kind == Symbol:
+    f.derefedSafe.incl symId(n.childCursor)
   if n.stmtKind in {VarS, ConstS}:
     let name = n.childCursor
     if name.kind == SymbolDef: f.declared.incl symId(name)
@@ -240,19 +254,35 @@ proc collectLoopFacts(n: Cursor; f: var LoopFacts) =
     let root = slotRoot(lhs)
     if root != SymId(0): f.written.incl root
     else: f.ptrStoreTargets.add pointerKey(lhs)
-  # An `(instr …)` counts unless its row is `efPure`: the loop rewrites below
-  # hoist an address and assume nothing in the body wrote the memory it names, and
-  # a `volatileStore` in the loop is exactly something that did. `Ctz` and friends
-  # keep the loop rewritable, which is the whole reason this is per-row.
-  if n.stmtKind == CallS or n.exprKind == CallC: f.hasCall = true
+  if n.stmtKind in {BreakS, RetS, RaiseS, JmpS}:
+    f.sawExit = true
+  # A `(call …)` counts unless its summary proves it effect-free or `noreturn`;
+  # an `(instr …)` counts unless its row is `efPure`. The loop rewrites below
+  # hoist an address and assume nothing in the body wrote the memory it names.
+  if n.stmtKind == CallS or n.exprKind == CallC:
+    var isNoRet = false
+    if not callIsEffectFree(c.resolver, n, isNoRet):
+      f.hasCall = true
+    elif isNoRet:
+      f.sawExit = true
+      let pos = cursorToPosition(c.orig[], n)
+      if pos < f.firstNoReturnPos: f.firstNoReturnPos = pos
   elif (n.stmtKind == InstrS or n.exprKind == InstrC) and
        not (f.m != nil and instrIsPure(f.m[], n)): f.hasCall = true
   if n.exprKind in AddrKinds:
     let root = slotRoot(n.childCursor)
     if root != SymId(0): f.addrTaken.incl root
+  let firstOnly = n.stmtKind == IteS or n.exprKind in {AndC, OrC}
+  let condOnly = n.stmtKind in {IfS, CaseS, WhileS, LoopS, TryS, OnerrS} or
+                 n.exprKind in AddrKinds
+  var first = true
   var m = n
   m.loopInto:
-    collectLoopFacts(m, f)
+    let childUncond = if condOnly: false
+                      elif firstOnly: uncond and first
+                      else: uncond
+    collectLoopFacts(c, m, f, childUncond)
+    first = false
     skip m
 
 proc symIsInvariant(c: Context; s: SymId; f: LoopFacts): bool =
@@ -261,7 +291,8 @@ proc symIsInvariant(c: Context; s: SymId; f: LoopFacts): bool =
   s notin f.declared and s notin f.written and s notin f.addrTaken and
     (c.orig[].pool.symIsLocal(s) or not f.hasCall)
 
-proc baseIsStable(c: var Context; base: Cursor; f: LoopFacts): bool =
+proc baseIsStable(c: var Context; base: Cursor; accPos: int;
+                  f: LoopFacts): bool =
   ## Is `addr base[…]` — the address this rewrite hoists out of the loop — the
   ## same on every iteration?
   ##
@@ -300,7 +331,9 @@ proc baseIsStable(c: var Context; base: Cursor; f: LoopFacts): bool =
         result = symIsInvariant(c, symId(obj), f)
       elif obj.kind == TagLit and obj.exprKind == DerefC:
         let p = obj.childCursor
-        if p.kind == Symbol and symIsInvariant(c, symId(p), f) and not f.hasCall:
+        if p.kind == Symbol and symIsInvariant(c, symId(p), f) and
+           not f.hasCall and
+           (accPos < f.firstNoReturnPos or symId(p) in f.derefedSafe):
           var own = ""
           treeKey(base, own)
           result = true
@@ -635,11 +668,14 @@ proc transformLoop(c: var Context; n: var Cursor) =
     collectAccesses(c, body, ivInfo.ivSym, accesses)
     var facts = LoopFacts(assigned: initHashSet[SymId](), written: initHashSet[SymId](),
                           declared: initHashSet[SymId](),
-                          addrTaken: initHashSet[SymId](), m: c.m)
-    collectLoopFacts(body, facts)
+                          addrTaken: initHashSet[SymId](),
+                          firstNoReturnPos: high(int),
+                          derefedSafe: initHashSet[SymId](), m: c.m)
+    collectLoopFacts(c, body, facts)
     var stable: seq[AccessInfo] = @[]
     for acc in accesses:
-      if baseIsStable(c, acc.base, facts) and operandIsInvariant(c, acc.inv, facts):
+      if baseIsStable(c, acc.base, acc.pos, facts) and
+         operandIsInvariant(c, acc.inv, facts):
         stable.add acc
     if stable.len > 0:
       if not c.scaledIndex:
@@ -725,7 +761,8 @@ proc tr(c: var Context; n: var Cursor) =
 # ---- public entry --------------------------------------------------------
 
 proc runInductionVariables*(buf: var TokenBuf; m: ptr MainModule;
-                            scaledIndex: bool; temps: var int): bool {.discardable.} =
+                            scaledIndex: bool; temps: var int;
+                            summaries: ptr FunctionSummaryTable = nil): bool {.discardable.} =
   ## Two-phase IV strength reduction: record rewrite patches, then rebuild
   ## `buf`. Without scaled-index addressing (`scaledIndex` false) every
   ## `(at arr iv)` becomes `(deref p)` for a pointer bumped next to the iv-inc;
@@ -734,7 +771,7 @@ proc runInductionVariables*(buf: var TokenBuf; m: ptr MainModule;
   ## `temps` is the body's `` `iv `` counter, kept across pipeline rounds.
   ## Returns whether it changed `buf`.
   result = false
-  var ctx = createContext(addr buf, m, scaledIndex)
+  var ctx = createContext(addr buf, m, scaledIndex, summaries)
   ctx.tempCounter = temps
   var n = beginRead(buf)
   tr(ctx, n)
@@ -745,9 +782,10 @@ proc runInductionVariables*(buf: var TokenBuf; m: ptr MainModule;
     result = true
 
 proc runInductionVariables*(buf: var TokenBuf;
-                            m: ptr MainModule = nil; scaledIndex = false) =
+                            m: ptr MainModule = nil; scaledIndex = false;
+                            summaries: ptr FunctionSummaryTable = nil) =
   var temps = 0
-  runInductionVariables(buf, m, scaledIndex, temps)
+  runInductionVariables(buf, m, scaledIndex, temps, summaries)
 
 # ---- self-tests ----------------------------------------------------------
 
@@ -1026,5 +1064,92 @@ when isMainModule:
       "(loop (stmts (asgn x.0.M (deref `iv.p.1)) (asgn n.0.M 5) " &
       "(asgn `iv.p.1 (addr (pat `iv.p.1 1))) (asgn i.0.M (add (i 32) i.0.M 1)) " &
       "(continue (lt i.0.M n.0.M))))) .))")
+
+  block summary_readonly_call_allows_iv:
+    # A summary-proved read-only call cannot rebind `(*c).data` or `n`:
+    # both count-to-zero (scaledIndex) and pointer-walk proceed.
+    let src =
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts (loop (stmts " &
+      "(asgn x.0.M (pat (dot (deref c.0.M) data.0.M 0) i.0.M)) " &
+      "(call ro.0.M x.0.M) " &
+      "(asgn i.0.M (add (i 32) i.0.M 1)) (continue (lt i.0.M n.0.M))))) .))"
+    var bScaled = parse(src)
+    var sm = initTable[SymId, FunctionSummary]()
+    sm[bScaled.pool.syms.getOrIncl("ro.0.M")] =
+      FunctionSummary(params: @[ParamEffect(cls: 0, reads: true)])
+    runInductionVariables(bScaled, scaledIndex = true, summaries = addr sm)
+    assertSame(bScaled,
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts " &
+      "(var :`iv.j.1 . (i 32) (sub (i 32) i.0.M n.0.M)) " &
+      "(var :`iv.p.2 . . (addr (pat (dot (deref c.0.M) data.0.M 0) i.0.M))) " &
+      "(var :`iv.q.3 . . (addr (pat `iv.p.2 (sub (i 32) n.0.M i.0.M)))) " &
+      "(loop (stmts (asgn x.0.M (pat `iv.q.3 `iv.j.1)) (call ro.0.M x.0.M) " &
+      "(asgn `iv.j.1 (add (i 32) `iv.j.1 1)) (continue (lt `iv.j.1 0))))) .))")
+
+    var bPtr = parse(src)
+    var smPtr = initTable[SymId, FunctionSummary]()
+    smPtr[bPtr.pool.syms.getOrIncl("ro.0.M")] =
+      FunctionSummary(params: @[ParamEffect(cls: 0, reads: true)])
+    runInductionVariables(bPtr, scaledIndex = false, summaries = addr smPtr)
+    assertSame(bPtr,
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts " &
+      "(var :`iv.p.1 . . (addr (pat (dot (deref c.0.M) data.0.M 0) i.0.M))) " &
+      "(loop (stmts (asgn x.0.M (deref `iv.p.1)) (call ro.0.M x.0.M) " &
+      "(asgn `iv.p.1 (addr (pat `iv.p.1 1))) (asgn i.0.M (add (i 32) i.0.M 1)) " &
+      "(continue (lt i.0.M n.0.M))))) .))")
+
+  block summary_noreturn_guard_deref_safety:
+    # Bounds guard dereferences `c` unconditionally before `panic`, so hoisting
+    # `(*c).data` is safe; a nil guard does not dereference `c` first, so
+    # hoisting `(*c).data` ahead of it stays blocked.
+    let boundsSrc =
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts (loop (stmts " &
+      "(ite (not (lt i.0.M (dot (deref c.0.M) len.0.M 0))) (stmts (call panic.0.M)) .) " &
+      "(asgn (pat (dot (deref c.0.M) data.0.M 0) i.0.M) x.0.M) " &
+      "(asgn i.0.M (add (i 32) i.0.M 1)) (continue (lt i.0.M n.0.M))))) .))"
+    var bOk = parse(boundsSrc)
+    var smOk = initTable[SymId, FunctionSummary]()
+    smOk[bOk.pool.syms.getOrIncl("panic.0.M")] =
+      FunctionSummary(noReturn: true, writesGlobal: true, callsUnknown: true)
+    runInductionVariables(bOk, scaledIndex = false, summaries = addr smOk)
+    assertSame(bOk,
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts " &
+      "(var :`iv.p.1 . . (addr (pat (dot (deref c.0.M) data.0.M 0) i.0.M))) " &
+      "(loop (stmts (ite (not (lt i.0.M (dot (deref c.0.M) len.0.M 0))) " &
+      "(stmts (call panic.0.M)) .) (asgn (deref `iv.p.1) x.0.M) " &
+      "(asgn `iv.p.1 (addr (pat `iv.p.1 1))) (asgn i.0.M (add (i 32) i.0.M 1)) " &
+      "(continue (lt i.0.M n.0.M))))) .))")
+
+    let nilSrc =
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts (loop (stmts " &
+      "(ite (eq c.0.M (nil)) (stmts (call panic.0.M)) .) " &
+      "(asgn x.0.M (pat (dot (deref c.0.M) data.0.M 0) i.0.M)) " &
+      "(asgn i.0.M (add (i 32) i.0.M 1)) (continue (lt i.0.M n.0.M))))) .))"
+    var bNil = parse(nilSrc)
+    var smNil = initTable[SymId, FunctionSummary]()
+    smNil[bNil.pool.syms.getOrIncl("panic.0.M")] =
+      FunctionSummary(noReturn: true, writesGlobal: true, callsUnknown: true)
+    let nilBefore = toString(bNil)
+    runInductionVariables(bNil, scaledIndex = false, summaries = addr smNil)
+    doAssert toString(bNil) == nilBefore, "hoisted deref above nil guard"
+
+  block summary_writing_call_still_blocks_iv:
+    let src =
+      "(stmts (var :i.0.M . . 0) (ite (lt 0 n.0.M) (stmts (loop (stmts " &
+      "(asgn x.0.M (pat (dot (deref c.0.M) data.0.M 0) i.0.M)) " &
+      "(call wr.0.M c.0.M) " &
+      "(asgn i.0.M (add (i 32) i.0.M 1)) (continue (lt i.0.M n.0.M))))) .))"
+    for bad in [
+      FunctionSummary(params: @[ParamEffect(cls: 0, writes: true)]),
+      FunctionSummary(writesGlobal: true, params: @[ParamEffect(cls: 0, reads: true)]),
+      FunctionSummary(callsUnknown: true, params: @[ParamEffect(cls: 0, reads: true)])
+    ]:
+      for scaled in [false, true]:
+        var b = parse(src)
+        var sm = initTable[SymId, FunctionSummary]()
+        sm[b.pool.syms.getOrIncl("wr.0.M")] = bad
+        let before = toString(b)
+        runInductionVariables(b, scaledIndex = scaled, summaries = addr sm)
+        doAssert toString(b) == before, "writing call did not block IV"
 
   echo "induction_variables.nim: all self-tests passed"

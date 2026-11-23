@@ -1074,6 +1074,36 @@ proc resolveCallee*(r: var SummaryResolver; key: SymId;
   summary = s
   result = true
 
+proc callIsEffectFree*(r: var SummaryResolver; call: Cursor;
+                       isNoReturn: var bool): bool =
+  ## True when `call`'s summary proves it cannot mutate caller-observable
+  ## memory before control returns: either it never returns (`noreturn`), or it
+  ## writes no globals, calls no unknown code, and writes through no argument.
+  ## Indirect calls and missing summaries return false (conservative clobber).
+  isNoReturn = false
+  if call.kind != TagLit: return false
+  let callee = child0(call)
+  if callee.kind != Symbol: return false
+  var s = FunctionSummary()
+  if not resolveCallee(r, symId(callee), s): return false
+  if s.noReturn:
+    isNoReturn = true
+    return true
+  if s.writesGlobal or s.callsUnknown: return false
+  var ca = call
+  var idx = 0
+  result = true
+  ca.into:
+    if ca.hasMore: skip ca                     # past callee
+    while ca.hasMore:
+      if paramMayWrite(s, idx): result = false
+      skip ca
+      inc idx
+
+proc callIsEffectFree*(r: var SummaryResolver; call: Cursor): bool =
+  var noRet = false
+  result = callIsEffectFree(r, call, noRet)
+
 proc callSummary(c: var Context; call: Cursor; summary: var FunctionSummary): bool =
   if call.kind != TagLit: return false
   let callee = child0(call)

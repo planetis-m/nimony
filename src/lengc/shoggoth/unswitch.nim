@@ -32,9 +32,10 @@
 ##    now, even when the loop body would never have reached it);
 ##  * every symbol the condition reads is invariant across the loop: never
 ##    assigned inside it, and — when the symbol is address-taken anywhere in the
-##    proc, or is a global — the loop body must additionally contain no call and
-##    no store the scan cannot attribute to a named local slot (nothing can
-##    write memory behind the scan's back);
+##    proc, or is a global — the loop body must additionally contain no store
+##    the scan cannot attribute to a named local slot and no call whose summary
+##    fails to prove it effect-free or `noreturn` (nothing can write memory
+##    behind the scan's back);
 ##  * the loop is small enough to duplicate (`MaxUnswitchSpan` tokens).
 ##
 ## The second copy's declarations (labels and locals) are freshened
@@ -47,6 +48,8 @@ import std / [assertions, tables, sets]
 import ".." / ".." / "lib" / nifcoreparse   # re-exports nifcore
 import ".." / ".." / "lib" / nifcdecl        # stmtKind/exprKind/substructureKind
 import ".." / ".." / "models" / tags         # tag ids for synthesis
+import ".." / nifmodules                     # MainModule (for foreign summary lookup)
+import cse                                   # SummaryResolver, FunctionSummaryTable
 import patchsets
 
 const
@@ -67,6 +70,7 @@ type
   Context = object
     orig: ptr TokenBuf
     counter: int
+    resolver: ptr SummaryResolver
     procAddrTaken: HashSet[SymId]
     defs: Table[SymId, int]
       ## the loop currently under consideration: every loop-local symbol with
@@ -195,12 +199,13 @@ proc slotRoot(c: Cursor): SymId =
       else: return SymId(0)
     else: return SymId(0)
 
-proc scanEffects(c: Cursor; assigned: var HashSet[SymId];
+proc scanEffects(ctx: var Context; c: Cursor; assigned: var HashSet[SymId];
                  opaque: var bool) =
   ## Collect the symbols the subtree assigns; set `opaque` when it could write
   ## memory the scan cannot attribute to a named slot (through-pointer store,
-  ## any call/instr) — `jtrue` writes its listed flags, so those count as
-  ## assignments, not as opaque.
+  ## any `(instr …)`, or any call not proved effect-free/`noreturn` by its
+  ## summary) — `jtrue` writes its listed flags, so those count as assignments,
+  ## not as opaque.
   if c.kind != TagLit: return
   case c.stmtKind
   of AsgnS:
@@ -222,11 +227,14 @@ proc scanEffects(c: Cursor; assigned: var HashSet[SymId];
       skip n
     return
   else: discard
-  if c.exprKind in {CallC, InstrC} or c.stmtKind in {CallS, InstrS}:
+  if c.exprKind == InstrC or c.stmtKind == InstrS:
     opaque = true
+  elif c.exprKind == CallC or c.stmtKind == CallS:
+    if ctx.resolver == nil or not callIsEffectFree(ctx.resolver[], c):
+      opaque = true
   var n = c
   n.loopInto:
-    scanEffects(n, assigned, opaque)
+    scanEffects(ctx, n, assigned, opaque)
     skip n
 
 proc collectAddrTaken(c: Cursor; acc: var HashSet[SymId]) =
@@ -452,7 +460,7 @@ proc scanWhiles(c: var Context; n: Cursor; cands: var seq[Candidate]) =
   if n.stmtKind in {WhileS, LoopS} and subtreeSpan(c.orig, n) <= MaxUnswitchSpan:
     var assigned = initHashSet[SymId]()
     var opaque = false
-    scanEffects(n, assigned, opaque)
+    scanEffects(c, n, assigned, opaque)
     collectLoopDefs(c, n)
     var conds: seq[int] = @[]
     var body = n
@@ -701,15 +709,19 @@ proc applyCandidate(c: var Context; cand: Candidate): TokenBuf =
 
 # ── public entry ─────────────────────────────────────────────────────────────
 
-proc runUnswitch*(buf: var TokenBuf; minted: var int): int {.discardable.} =
+proc runUnswitch*(buf: var TokenBuf; minted: var int;
+                  summaries: ptr FunctionSummaryTable = nil;
+                  m: ptr MainModule = nil): int {.discardable.} =
   ## Fixpoint: unswitch one loop per round (the innermost candidate), rebuild,
   ## rescan. Returns the number of loops unswitched. `minted` is the body's
   ## `` `us `` counter, kept across pipeline rounds.
   result = 0
+  var resolver = initSummaryResolver(summaries, m)
   var rounds = 0
   while rounds < MaxRounds:
     inc rounds
     var c = Context(orig: addr buf, counter: minted,
+                    resolver: addr resolver,
                     procAddrTaken: initHashSet[SymId]())
     block:
       let root = beginRead(buf)
@@ -725,9 +737,11 @@ proc runUnswitch*(buf: var TokenBuf; minted: var int): int {.discardable.} =
     buf = ensureMove(newBuf)
     inc result
 
-proc runUnswitch*(buf: var TokenBuf): int {.discardable.} =
+proc runUnswitch*(buf: var TokenBuf;
+                  summaries: ptr FunctionSummaryTable = nil;
+                  m: ptr MainModule = nil): int {.discardable.} =
   var minted = 0
-  result = runUnswitch(buf, minted)
+  result = runUnswitch(buf, minted, summaries, m)
 
 # ── self-tests ───────────────────────────────────────────────────────────────
 
@@ -914,5 +928,54 @@ when isMainModule:
       "(if (elif (lt 14 x.1) (stmts (asgn a.0 1))) (else (stmts (asgn a.0 2)))) " &
       "(asgn i.0 (add (i 64) i.0 1)))))"
     doAssert unswitched(src) == canon(src)
+
+  block summary_allows_readonly_and_noreturn_calls:
+    # `flag.0.M` is address-taken: a noreturn panic guard or a summary-proved
+    # read-only callee cannot mutate it, so unswitching proceeds.
+    let srcNoRet =
+      "(stmts (var :p.0.M . (ptr (bool)) (haddr flag.0.M)) " &
+      "(while (lt i.0.M n.0.M) (stmts " &
+      "(ite (le n.0.M i.0.M) (stmts (call panic.0.M)) .) " &
+      "(if (elif flag.0.M (stmts (asgn a.0.M 1))) (else (stmts (asgn a.0.M 2)))) " &
+      "(if (elif flag.0.M (stmts (asgn b.0.M 1))) (else (stmts (asgn b.0.M 2)))) " &
+      "(asgn i.0.M (add (i 64) i.0.M 1)))))"
+    var b1 = parse(srcNoRet)
+    var sm1 = initTable[SymId, FunctionSummary]()
+    sm1[b1.pool.syms.getOrIncl("panic.0.M")] =
+      FunctionSummary(noReturn: true, writesGlobal: true, callsUnknown: true)
+    doAssert runUnswitch(b1, addr sm1) == 1
+    doAssert toString(b1).count("(while") == 2
+
+    let srcRo =
+      "(stmts (while (lt i.0.M n.0.M) (stmts " &
+      "(if (elif flag.0.M (stmts (asgn a.0.M 1))) (else (stmts (asgn a.0.M 2)))) " &
+      "(if (elif flag.0.M (stmts (asgn b.0.M 1))) (else (stmts (asgn b.0.M 2)))) " &
+      "(call ro.0.M i.0.M) " &
+      "(asgn i.0.M (add (i 64) i.0.M 1)))))"
+    var b2 = parse(srcRo)
+    var sm2 = initTable[SymId, FunctionSummary]()
+    sm2[b2.pool.syms.getOrIncl("ro.0.M")] =
+      FunctionSummary(params: @[ParamEffect(cls: 0, reads: true)])
+    doAssert runUnswitch(b2, addr sm2) == 1
+    doAssert toString(b2).count("(while") == 2
+
+  block summary_writing_call_still_blocks_unswitch:
+    let src =
+      "(stmts (var :p.0.M . (ptr (bool)) (haddr flag.0.M)) " &
+      "(while (lt i.0.M n.0.M) (stmts " &
+      "(if (elif flag.0.M (stmts (asgn a.0.M 1))) (else (stmts (asgn a.0.M 2)))) " &
+      "(if (elif flag.0.M (stmts (asgn b.0.M 1))) (else (stmts (asgn b.0.M 2)))) " &
+      "(call wr.0.M p.0.M) " &
+      "(asgn i.0.M (add (i 64) i.0.M 1)))))"
+    for bad in [
+      FunctionSummary(params: @[ParamEffect(cls: 0, writes: true)]),
+      FunctionSummary(writesGlobal: true, params: @[ParamEffect(cls: 0, reads: true)]),
+      FunctionSummary(callsUnknown: true, params: @[ParamEffect(cls: 0, reads: true)])
+    ]:
+      var b = parse(src)
+      var sm = initTable[SymId, FunctionSummary]()
+      sm[b.pool.syms.getOrIncl("wr.0.M")] = bad
+      doAssert runUnswitch(b, addr sm) == 0
+      doAssert toString(b) == canon(src)
 
   echo "unswitch.nim: all self-tests passed"
