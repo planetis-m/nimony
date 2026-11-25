@@ -1285,7 +1285,9 @@ proc tryBuiltinDot(c: var SemContext; dest: var TokenBuf; it: var Item; lhs: Ite
         return FailedDot
       semExprSym c, dest, it, s, exprStart, flags
       return
-    let t = skipModifierAndOwned(lhs.typ)
+    var t = skipModifierAndOwned(lhs.typ)
+    let constraint = concreteConstraint(t)
+    if not cursorIsNil(constraint): t = constraint # `T: C` has the fields of `C`
     var root = t
     var doDeref = false # maybe arbitrary number of derefs for compat mode
     if root.typeKind in {RefT, PtrT}:

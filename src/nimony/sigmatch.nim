@@ -1178,6 +1178,19 @@ proc isTypevar(s: SymId): bool =
     let typevar = asTypevar(res.decl)
     result = isTypevarLike(typevar.kind)
 
+proc concreteConstraint*(t: Cursor): Cursor =
+  ## For a type parameter `T: C` whose constraint `C` is an object type or a
+  ## `ref`/`ptr` to one, `C`: `T` is a subtype of `C`, so a checked generic
+  ## body may use a `T` value as a `C`. A nil cursor otherwise.
+  result = default(Cursor)
+  if t.isSymbol and isTypevar(t.symId) and not isStaticTypevar(t.symId):
+    let c = asTypevar(tryLoadSym(t.symId).decl).typ
+    var o = c
+    if o.typeKind in {RefT, PtrT}: inc o
+    if isObjectType(o) and not (o.isSymbol and
+        getTypeSection(o.symId).typevars.substructureKind == TypevarsU):
+      result = c
+
 proc cmpTypeBits(context: ptr SemContext; f, a: Cursor): int =
   if (f.isIntLit or f.kind == InlineInt) and
      (a.isIntLit or a.kind == InlineInt):
@@ -2257,7 +2270,15 @@ proc singleArgImpl(m: var Match; f: var Cursor; arg: CallArg) =
   if aSym != NoSymId:
     inferArgTypevar(m, f, arg, aSym)
   else:
-    singleArgOnFormal(m, f, arg)
+    let c = concreteConstraint(skipModifier(arg.typ))
+    if not cursorIsNil(c) and not (f.isSymbol and isTypevar(f.symId)) and
+        f.typeKind notin {MutT, OutT, SinkT, LentT, OwnedT, TypedescT, UntypedT,
+                          TypedT, VarargsT, AutoT}:
+      # a `T: C` value matches a `C` formal as a subtype, below a generic match
+      inc m.inheritanceCosts
+      singleArgOnFormal(m, f, CallArg(n: arg.n, typ: c, orig: arg.orig))
+    else:
+      singleArgOnFormal(m, f, arg)
 
 proc singleArgOnFormal(m: var Match; f: var Cursor; arg: CallArg) =
   ## Matches `arg` by the shape of the formal `f`. Every recursion goes through

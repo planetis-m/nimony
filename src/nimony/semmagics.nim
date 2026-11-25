@@ -834,7 +834,9 @@ proc semDeref*(c: var SemContext; dest: var TokenBuf; it: var Item) =
     arg.n = it.n
     semExpr c, dest, arg
     it.n = arg.n
-  let t = skipModifier(arg.typ)
+  var t = skipModifier(arg.typ)
+  let constraint = concreteConstraint(t)
+  if not cursorIsNil(constraint): t = constraint # `T: ptr C` dereferences as `ptr C`
   case t.typeKind
   of RefT, PtrT:
     it.typ = t
