@@ -752,6 +752,17 @@ proc considerTypeboundOps(c: var SemContext; m: var seq[Match]; fnName: StrId; a
       m.add createMatch(addr c, expected)
       sigmatchNamedArgs(m[^1], candidate, args, genericArgs, hasNamedArgs)
 
+proc collectParamRefs(n: Cursor; refs: var HashSet[SymId]) =
+  ## The symbols an inserted default reads; the routine's own parameters
+  ## among them stand for the caller's arguments (`proc p(a: int; w = a)`).
+  if n.kind == Symbol:
+    refs.incl n.symId
+  elif n.kind == TagLit:
+    var n = sub(n)
+    while n.hasMore:
+      collectParamRefs(n, refs)
+      skip n
+
 proc addArgsInstConverters(c: var SemContext; dest: var TokenBuf; m: var Match; origArgs: openArray[CallArg]) =
   if not (m.genericConverter or m.refineArgType or m.insertedParam):
     dest.add m.args
@@ -762,15 +773,50 @@ proc addArgsInstConverters(c: var SemContext; dest: var TokenBuf; m: var Match; 
       skipToParams f
     assert f.substructureKind == ParamsU
     f = sub(f) # bound the param walk
+    var refs = initHashSet[SymId]()
+    var a = beginRead(m.args)
+    var p = f
+    while a.hasMore and p.hasMore:
+      if a.isDotToken: collectParamRefs(asLocal(p).val, refs)
+      skip a; skip p
+    # typevars and the parameters an inserted default reads -> the caller's
+    var bindings = m.inferred
+    var bindBufs: seq[TokenBuf] = @[]
     var arg = beginRead(m.args)
     var i = 0
     while arg.hasMore:
+      let ps = asLocal(f).name.symId
+      let isVar = asLocal(f).typ.typeKind in {MutT, OutT}
+      var tmp = SymId(0)
+      var v = arg # the value under an implicit conversion (`toOpenArray`)
+      if v.exprKind == HcallX: v = sub(v); skip v
+      if ps in refs and not arg.isDotToken and not needsTemp(v):
+        bindings[ps] = arg # read again for free; a view stays unborrowed after the call
+      elif ps in refs:
+        # evaluated once, in order: `(expr (let tmp T arg) tmp)`; a `var`
+        # argument is bound by address so the callee still writes the location
+        tmp = identToSym(c, "tmp", LetY)
+        var t = skipModifier(asLocal(f).typ)
+        if m.inferred.len > 0: t = instantiateType(c, t, m.inferred)
+        if isVar: t = ptrTypeOf(c, dest, t)
+        template letHead(b: var TokenBuf) =
+          b.addParLe(LetS, arg.info)
+          b.addSymDef(tmp, arg.info)
+          b.addEmpty(); b.addEmpty() # export marker, pragmas
+          b.addSubtree t
+        var decl = createTokenBuf(8)
+        letHead decl
+        decl.addEmpty(); decl.addParRi()
+        programs.publish tmp, decl, c.phase # so the default's sem can type it
+        dest.addParLe(ExprX, arg.info)
+        letHead dest # its value follows
+        if isVar: dest.addParLe(AddrX, arg.info)
       if m.insertedParam and arg.isDotToken:
         let param = asLocal(f)
         assert not param.val.isDotToken
         var defaultValueBuf = createTokenBuf(30)
         var defaultValue = Item(n: param.val, typ: c.types.autoType)
-        instantiateExprIntoBuf(c, defaultValueBuf, defaultValue, m.inferred)
+        instantiateExprIntoBuf(c, defaultValueBuf, defaultValue, bindings)
         let prevErr = m.err
         swap m.args, dest
         typematch(m, param.typ, defaultValue)
@@ -897,6 +943,17 @@ proc addArgsInstConverters(c: var SemContext; dest: var TokenBuf; m: var Match; 
         arg = item.n
       else:
         takeTree dest, arg
+      if tmp != SymId(0):
+        if isVar: dest.addParRi()
+        dest.addParRi() # let
+        var use = createTokenBuf(4)
+        if isVar: use.addParLe(DerefX, arg.info)
+        use.addSymUse(tmp, arg.info)
+        if isVar: use.addParRi()
+        dest.add use
+        dest.addParRi() # expr
+        bindBufs.add ensureMove(use)
+        bindings[ps] = beginRead(bindBufs[^1])
       skip f # should not be parri
       inc i
     assert not f.hasMore
