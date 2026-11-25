@@ -60,7 +60,7 @@ iterator items*[T: OrdinalEnum](E: typedesc[T]): T =
     if v == high(E): break
     inc v
 
-iterator countdown*[T: Ordinal and Comparable and Orderable; V: Ordinal](a, b: T; step: V = T(1)): T {.inline,
+iterator countdown*[T: Ordinal and Comparable and Orderable; V: Ordinal](a, b: T; step: V): T {.inline,
     ensures: (b <= result and result <= a).} =
   ## Counts from ordinal value `a` down to `b` (inclusive) with the given
   ## step count.
@@ -142,3 +142,8 @@ iterator fieldPairs*[T: tuple|object](x, y: T): tuple[
   ## .. warning:: This really transforms the 'for' and unrolls the loop.
   ##   The current implementation also has a bug that affects symbol binding
   ##   in the loop body.
+
+iterator countdown*[T: Ordinal and Comparable and Orderable](a, b: T): T {.inline,
+    ensures: (b <= result and result <= a).} =
+  ## Counts from ordinal value `a` down to `b` (inclusive) in steps of 1.
+  for i in countdown(a, b, 1): yield i
