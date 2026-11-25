@@ -1245,7 +1245,7 @@ proc matchNilAnnotations(m: var Match; f, a: var Cursor; fOrig, aOrig: Cursor) =
     else:
       m.error(InvalidMatch, fOrig, aOrig)
 
-proc procTypeMatch(m: var Match; f, a: var Cursor)
+proc procTypeMatch(m: var Match; f, a: var Cursor; atArgRoot: bool)
 
 proc rematchInferredTypevar(m: var Match; fs: SymId; prev: Cursor;
                             f, a: var Cursor; fOrig, aOrig: Cursor;
@@ -1395,7 +1395,7 @@ proc linearMatchTree(m: var Match; f, a: var Cursor; fOrig, aOrig: Cursor;
           m.error(InvalidMatch, fOrig, aOrig)
         else:
           var a2 = a # since procTypeMatch does not skip it properly
-          procTypeMatch m, f, a2
+          procTypeMatch m, f, a2, false # nested in the argument's type
           skip a # XXX consider when a is (params)
       of IntT, UIntT, FloatT, CharT:
         if a.typeKind != f.typeKind:
@@ -1540,10 +1540,13 @@ proc skipRoutinePrefix*(n: var Cursor; kind: TypeKind) =
     skip n # pattern
     skip n # generics
 
-proc procTypeMatch(m: var Match; f, a: var Cursor) =
+proc procTypeMatch(m: var Match; f, a: var Cursor; atArgRoot: bool) =
   ## Matches two routine types structurally. `f` ends up past its whole
   ## type tree (also on the error paths); `a` is left just past its pragmas
   ## slot, still inside its tree — every caller works on a copy of `a`.
+  ## `atArgRoot`: `a` is the argument's own type. Only then can a nimcall
+  ## value become a closure: the `(toClosure)` wraps the whole argument, so
+  ## inside a tuple, array, pointer or another proc type it is a mismatch.
   assert f.typeKind in RoutineTypes
   let fKind = f.typeKind
   let fIsProctype = fKind in {ProctypeT, ItertypeT}
@@ -1612,7 +1615,8 @@ proc procTypeMatch(m: var Match; f, a: var Cursor) =
     m.error CallConvMismatch, f, a
   elif fcc.usesRaises != acc.usesRaises:
     m.error RaisesMismatch, f, a
-  elif (fcc.usesClosure != acc.usesClosure) and (not fcc.usesClosure or acc.cc != Nimcall):
+  elif (fcc.usesClosure != acc.usesClosure) and
+      (not fcc.usesClosure or acc.cc != Nimcall or not atArgRoot):
     m.error ClosureMismatch, f, a
   elif fcc.usesPassive != acc.usesPassive:
     m.error PassiveMismatch, f, a
@@ -1809,7 +1813,7 @@ proc tryMatchProcChoice*(context: ptr SemContext; choice, f: Cursor): SymId =
         if ac.typeKind in RoutineTypes:
           var trial = createMatch(context)
           var fc = f
-          procTypeMatch(trial, fc, ac)
+          procTypeMatch(trial, fc, ac, true)
           if not trial.err:
             result = a.symId
             inc matchCount
@@ -2515,7 +2519,7 @@ proc singleArgOnFormal(m: var Match; f: var Cursor; arg: CallArg) =
           inc m.opened
         skip f
       of RoutineTypes:
-        procTypeMatch m, f, a
+        procTypeMatch m, f, a, true
       else:
         let chosen =
           if arg.n.exprKind in {OchoiceX, CchoiceX}: tryNarrowChoice(m.context, arg.n, f)
