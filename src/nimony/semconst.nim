@@ -58,6 +58,9 @@ proc semConstBoolExpr*(c: var SemContext; dest: var TokenBuf; n: var Cursor; all
   let start = dest.len
   let it = semBoolExprBody(c, dest, n, start)
   n = it.n
+  if allowUnresolved and skipModifier(it.typ).typeKind == UntypedT:
+    # built from a template's `untyped` parameter: no value until expansion
+    return
   var e = cursorAt(dest, start)
   var valueBuf = evalExpr(c, e)
   endRead e
@@ -141,10 +144,12 @@ proc semConstExpr*(c: var SemContext; dest: var TokenBuf; it: var Item) =
   swap c.phase, phase
   semExpr c, dest, it
   swap c.phase, phase
-  if c.inGenericDefinition > 0 and containsGenericParams(readonlyCursorAt(dest, start)):
-    # `const n = sizeof(T)`: the value depends on a type parameter, so like a
-    # `when` condition it stays the checked expression and each instantiation,
-    # which checks the body again with `T` bound, evaluates it.
+  if c.inGenericDefinition > 0 and (skipModifier(it.typ).typeKind == UntypedT or
+      containsGenericParams(readonlyCursorAt(dest, start))):
+    # `const n = sizeof(T)`: the value depends on a type parameter (or is
+    # built from an `untyped` template parameter), so like a `when` condition
+    # it stays the checked expression and each instantiation, which checks
+    # the body again with the parameters bound, evaluates it.
     return
   var e = cursorAt(dest, start)
   var valueBuf = evalExpr(c, e, it.typ)
