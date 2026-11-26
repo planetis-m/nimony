@@ -2600,7 +2600,8 @@ proc semTry(c: var SemContext; dest: var TokenBuf; it: var Item) =
     producesVoid c, dest, info, it.typ
 
 proc semUnresolvedWhenBranch(c: var SemContext; dest: var TokenBuf; it: var Item;
-                             mode: WhenMode; state: var SemObjectState) =
+                             mode: WhenMode; state: var SemObjectState;
+                             decls: var Table[StrId, Sym]) =
   ## A branch of a `when` whose condition depends on generic parameters. In a
   ## checked generic its body is type-checked at definition time like an `if`
   ## branch, so the `when` has the branches' common type and a tail `when` is
@@ -2609,8 +2610,27 @@ proc semUnresolvedWhenBranch(c: var SemContext; dest: var TokenBuf; it: var Item
   ## declarations still need stable symbols so generic code can name them.
   case mode
   of NormalWhen:
+    let start = dest.len
+    var branch = initTable[StrId, seq[Sym]]() # names the branch declared
     withNewScope c:
       semStmtBranch c, dest, it, true
+      if c.routine.kind == TemplateY: branch = c.currentScope.tab
+    if c.routine.kind == TemplateY:
+      # Only one branch survives an expansion, declaring into the enclosing
+      # scope: a name declared in several branches is one symbol, visible
+      # after the `when` (as `semuntyped.WhenFrame` does for untyped bodies).
+      var rename = initTable[SymId, SymId]()
+      for lit, syms in pairs(branch):
+        if syms.len == 1:
+          let first = decls.getOrDefault(lit, Sym(name: SymId(0)))
+          if first.name == SymId(0): decls[lit] = syms[0]
+          else: rename[syms[0].name] = first.name
+      if rename.len > 0:
+        for i in start ..< dest.len:
+          let t = readonlyCursorAt(dest, i)
+          if t.kind in {Symbol, SymbolDef}:
+            let r = rename.getOrDefault(t.symId, SymId(0))
+            if r != SymId(0): setSymIdAt(dest, i, r)
   of ObjectWhen:
     let bodyInfo = it.n.info
     dest.addParLe(StmtsU, bodyInfo)
@@ -2741,6 +2761,7 @@ proc semWhenImpl(c: var SemContext; dest: var TokenBuf; it: var Item; mode: When
   let whenStart = it.n
   it.n = sub(it.n)
   var leaveUnresolved = false
+  var branchDecls = initTable[StrId, Sym]()
   if it.n.hasMore and it.n.substructureKind == ElifU:
     while it.n.hasMore and it.n.substructureKind == ElifU:
       dest.addParLe(it.n.cursorTagId, it.n.info)
@@ -2769,7 +2790,7 @@ proc semWhenImpl(c: var SemContext; dest: var TokenBuf; it: var Item; mode: When
           leaveUnresolved = true
       if leaveUnresolved:
         # might have been set above
-        semUnresolvedWhenBranch c, dest, it, mode, state
+        semUnresolvedWhenBranch c, dest, it, mode, state, branchDecls
       else:
         takeTree dest, it.n
       dest.addParRi(it.n.endInfo)
@@ -2792,11 +2813,14 @@ proc semWhenImpl(c: var SemContext; dest: var TokenBuf; it: var Item; mode: When
       it.n = whenStart; skip it.n
       return
     else:
-      semUnresolvedWhenBranch c, dest, it, mode, state
+      semUnresolvedWhenBranch c, dest, it, mode, state, branchDecls
     dest.addParRi(it.n.endInfo)
     it.n = elseStart; skip it.n
   dest.addParRi(it.n.endInfo)
   it.n = whenStart; skip it.n
+  for lit, s in pairs(branchDecls):
+    if s.kind in RoutineKinds: addOverloadable(c.currentScope, lit, s)
+    else: discard addNonOverloadable(c.currentScope, lit, s)
   if not leaveUnresolved:
     # none of the branches evaluated, output nothing
     dest.shrink start
