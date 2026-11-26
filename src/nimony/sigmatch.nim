@@ -2009,7 +2009,8 @@ proc skipExpr*(n: Cursor): Cursor =
 proc matchIntegralType(m: var Match; f: var Cursor; arg: CallArg) =
   var a = skipModifier(arg.typ)
   if a.typeKind == RangetypeT:
-    inc a # skip to base type
+    inc a # subrange match: `range[T]` matches when `T` matches exactly
+    inc m.inheritanceCosts
   let ex = skipExpr(arg.n)
   let isIntLit = f.typeKind != CharT and
     ex.isIntLit and sameTrees(a, m.context.types.intType)
@@ -2413,12 +2414,13 @@ proc singleArgOnFormal(m: var Match; f: var Cursor; arg: CallArg) =
         if f.typeKind in {IntT, UIntT, FloatT} and not sameTrees(f, a) and
             skipExpr(arg.n).kind in {IntLit, FloatLit}:
           # a literal fits the base type as it fits that type itself:
-          # `5` for `range[0'i8 .. 100'i8]`. The cost keeps `p(5)` picking
-          # `p(x: int8)` over `p(x: range[0'i8 .. 100'i8])`.
+          # `5` for `range[0'i8 .. 100'i8]`.
           matchIntegralType m, f, arg # consumes the base type
-          inc m.inheritanceCosts
         else:
           linearMatch m, f, a
+        # narrowing to the range costs what widening from a range costs: it
+        # keeps `p(5)` picking `p(x: int8)` over `p(x: range[0'i8 .. 100'i8])`
+        inc m.inheritanceCosts
         skip f # lo bound
         skip f # hi bound
         expectParRi m, f, fStart
