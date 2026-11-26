@@ -421,7 +421,10 @@ type
   SubsContext = object
     newVars: Table[SymId, SymId]
     params: ptr Table[SymId, Cursor]
-    instSuffix: string
+    instSuffix: string ## a type instance's key: every name its body declares
+                       ## is named from it
+    routineInstKey: string ## a routine instance's `I<suffix>`: its globals
+                           ## are named from it
 
 proc addFreshSyms(c: var SemContext, sc: var SubsContext) =
   for _, newVar in sc.newVars:
@@ -462,8 +465,23 @@ proc subs(c: var SemContext; dest: var TokenBuf; sc: var SubsContext; body: Curs
       dest.addSymDef(newDef, n.info)
   of TagLit:
     let fld = n.substructureKind in {FldU, GfldU}
+    let global = sc.routineInstKey != "" and
+                 n.stmtKind in {GvarS, GletS, TvarS, TletS}
     dest.addParLe(n.cursorTagId, n.info)
     n.into:
+      if global:
+        # "Each instance of a generic routine has a global of its own": every
+        # module that instantiates the routine must arrive at the same name for
+        # it, so it is named from the instance key, like the instance, and the
+        # copies merge into one (`dce2.resolveSymbolConflicts`). One key: the
+        # name of a global of an enclosing instance does not stack its key.
+        let s = n.symId
+        let parts = pool.sym(s)
+        let newDef = pool.symId(pool.strings[parts.name], parts.disamb,
+                                c.thisModuleSuffix, sc.routineInstKey)
+        sc.newVars[s] = newDef
+        dest.addSymDef(newDef, n.info)
+        skip n
       while n.hasMore:
         subs(c, dest, sc, n, fld)
         skip n
@@ -510,6 +528,9 @@ proc subsGenericType(c: var SemContext; dest: var TokenBuf; req: InstRequest) =
 proc subsGenericProc(c: var SemContext; dest: var TokenBuf; req: InstRequest) =
   let info = req.requestFrom[^1]
   let decl = getProcDecl(req.origin)
+  let instKey = pool.sym(req.targetSym).dedup # see `newInstSymId`
+  var sc = SubsContext(params: addr req.inferred,
+    routineInstKey: (if instKey == StrId(0): "" else: pool.strings[instKey]))
   dest.buildTree decl.kind, info:
     dest.addSymDef(req.targetSym, info)
     if decl.exported.isTagLit:
@@ -520,7 +541,6 @@ proc subsGenericProc(c: var SemContext; dest: var TokenBuf; req: InstRequest) =
     dest.copyTree decl.pattern
     produceInvoke c, dest, req, decl.typevars, info
 
-    var sc = SubsContext(params: addr req.inferred)
     subs(c, dest, sc, decl.params)
     subs(c, dest, sc, decl.retType)
     subs(c, dest, sc, decl.pragmas)

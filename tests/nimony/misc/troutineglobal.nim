@@ -6,6 +6,8 @@
 #   in two modules) were one C symbol.
 # - #3159: a global (or thread-local) without an initializer was reset on
 #   every call.
+# - A generic instance used by several modules is one routine: one global, and
+#   one run of its initializer (`shared`, `sharedItems`).
 
 when defined(nimony):
   {.feature: "assumeSync".}
@@ -73,5 +75,10 @@ proc main() =
   for i in 1 .. 3:
     echo remember(i), " ", rememberInit(i), " ", rememberThread(i)
   echo ifInit(), " ", ifInit()
+  echo sharedAtB, " ", shared(5), " ", b2(), " ", shared(6), " inits=", sharedInits
+  var it = 0
+  for v in sharedItems(5): it = v
+  echo it, " ", b3(), " ", b3()
+  echo kindsAtB, " | ", sharedKinds(5), " | ", b4()
 
 main()

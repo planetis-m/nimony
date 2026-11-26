@@ -1537,7 +1537,11 @@ proc trLocal(c: var Context; n: var Cursor; k: StmtKind) =
   if r.val.kind == DotToken:
     copyTree c.dest, r.val
     c.dest.addParRi()
-    callWasMoved c, r.name.symId, r.name.info, r.typ
+    if k notin {GvarS, GletS, TvarS, TletS} or not hasPragma(r.pragmas, NoinitP):
+      # A `.noinit` global is zeroed storage its declaration leaves alone, as
+      # `contracts_fir` reads it: the code that declared it so initializes it
+      # (`xelim.trInstanceGlobalInto`).
+      callWasMoved c, r.name.symId, r.name.info, r.typ
     if k in {VarS, LetS, ResultS}:
       c.unassigned.incl r.name.symId
   elif k == ConstS:

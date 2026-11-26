@@ -1221,6 +1221,60 @@ proc trLocalInto(c: var Context; dest: var TokenBuf; n: var Cursor) =
     tmp.addTarget v
   dest.add tmp
 
+proc trInstanceGlobalInto(c: var Context; dest: var TokenBuf; n: var Cursor) =
+  ## The global of a generic routine's instance is declared by every module
+  ## that instantiates the routine, under the one name sem derives from the
+  ## instance (`sem.subs`), and the copies are one location. So none of these
+  ## declarations initializes it (`.noinit`): each module's init does, before
+  ## its toplevel statements, unless an earlier one did. A guard, shared the
+  ## same way, makes `=wasMoved` and the initializer run once. That
+  ## assignment is the one write a `let` gets, so the declaration is a `var`.
+  let info = n.info
+  let tag = if n.stmtKind in {TvarS, TletS}: TvarS else: GvarS
+  let r = takeLocal(n, SkipFinalParRi)
+  let global = r.name.symId
+  let parts = pool.sym(global)
+  let guard = pool.symId("`" & pool.strings[parts.name] & "Guard", parts.disamb,
+                         c.thisModuleSuffix, pool.strings[parts.dedup])
+  var decls = createTokenBuf(30)
+  decls.addParLe tag, info
+  decls.addSymDef global, r.name.info
+  decls.copyTree r.exported
+  decls.copyIntoKind PragmasU, info:
+    decls.copyIntoKind NoinitP, info: discard
+    if r.pragmas.substructureKind == PragmasU:
+      var p = sub(r.pragmas) # `trLocalInto` drops the `.global`
+      while p.hasMore:
+        decls.copyTree p
+        skip p
+  decls.copyTree r.typ
+  decls.addDotToken()
+  decls.addParRi()
+  decls.copyIntoKind GvarS, info:
+    decls.addSymDef guard, info
+    decls.addDotToken() # export marker
+    decls.addDotToken() # pragmas
+    decls.copyTree c.typeCache.builtins.boolType
+    decls.addDotToken()
+  var d = beginRead(decls)
+  trLocalInto c, dest, d # the global
+  trLocalInto c, dest, d # its guard
+  endRead d
+  copyIntoKind dest, IfS, info:
+    copyIntoKind dest, ElifU, info:
+      copyIntoKind dest, NotX, info:
+        dest.addSymUse guard, info
+      copyIntoKind dest, StmtsS, info:
+        copyIntoKind dest, AsgnS, info:
+          dest.addSymUse guard, info
+          copyIntoKind dest, TrueX, info: discard
+        copyIntoKind dest, WasmovedX, info:
+          copyIntoKind dest, HaddrX, info:
+            dest.addSymUse global, info
+        if r.val.kind != DotToken:
+          var v = r.val
+          trExprInto c, dest, v, global
+
 proc trLocal(c: var Context; dest: var TokenBuf; n: var Cursor) =
   ## A `var x {.global.}` (or `.threadvar`) in a routine is one location for the
   ## whole program: it moves to module scope, together with the temps of its
@@ -1230,7 +1284,10 @@ proc trLocal(c: var Context; dest: var TokenBuf; n: var Cursor) =
   ## reset it per call (#3159).
   if c.inRoutine and n.stmtKind in {GvarS, GletS, TvarS, TletS}:
     var hoisted = move c.hoisted
-    trLocalInto c, hoisted, n
+    if pool.symIsInstantiation(asLocal(n).name.symId):
+      trInstanceGlobalInto c, hoisted, n
+    else:
+      trLocalInto c, hoisted, n
     c.hoisted = move hoisted
   else:
     trLocalInto c, dest, n
