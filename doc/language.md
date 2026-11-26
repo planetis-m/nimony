@@ -1343,7 +1343,8 @@ Let `f` be the formal parameter's type and `a` the type of the argument.
 4. Subrange or subtype match: `a` is a `range[T]` and `T`
    matches `f` exactly. Or: `a` is a subtype of `f`.
 5. Integral conversion match: `a` is convertible to `f` and `f` and `a`
-   is some integer or floating-point type.
+   is some integer or floating-point type. Or: `a` is a subrange of an enum
+   type and `f` is a generic parameter constrained to `enum`.
 6. Conversion match: `a` is convertible to `f`, possibly via a user
    defined `converter`.
 
