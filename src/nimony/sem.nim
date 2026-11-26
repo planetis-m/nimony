@@ -1971,7 +1971,19 @@ proc semTypeof(c: var SemContext; dest: var TokenBuf; it: var Item) =
   else:
     assert false
 
+  let beforeArg = dest.len
   semExpr c, dest, it, semFlags
+  if dest[beforeArg].kind == TagLit and dest[beforeArg].tagId == nifpools.ErrT and
+      c.inGenericDefinition == 0:
+    # the type of an operand that failed to type-check is that failure, not `auto`
+    # (outside generic and template bodies, where an operand's error is not final)
+    var err = createTokenBuf(16)
+    err.addSubtree readonlyCursorAt(dest, beforeArg)
+    dest.shrink beforeExpr
+    dest.add err
+    it.typ = c.types.autoType
+    it.n = typeofStart; skip it.n
+    return
   var t = it.typ
   if t.typeKind == TypedescT: inc t
   # `typeof` produces the *value* type: drop reference qualifiers so that e.g.

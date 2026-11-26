@@ -45,3 +45,19 @@ iterator foo(x: int): char = discard
 
 assert typeof(foo(0), typeOfProc) is string
 assert typeof(foo(0), typeOfIter) is char
+
+# an operand that fails to type-check makes `typeof` fail too
+assert not compiles(typeof(undeclaredName))
+
+template a1(x: untyped): untyped =
+  when compiles(typeof(x)): "c" else: "nc"
+template a2(x: untyped): untyped {.untyped.} =
+  when compiles(typeof(x)): "c" else: "nc"
+assert a1(1) == "c"
+assert a1(undeclaredName) == "nc"
+assert a2(1) == "c"
+assert a2(undeclaredName) == "nc"
+
+var annotated: int = 1
+const annotatedIsInt = typeof(annotated) is int
+assert annotatedIsInt

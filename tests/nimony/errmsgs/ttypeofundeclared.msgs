@@ -1,0 +1,4 @@
+tests/nimony/errmsgs/ttypeofundeclared.nim(7, 19) Error: undeclared identifier: i
+tests/nimony/errmsgs/ttypeofundeclared.nim(8, 13) Error: undeclared identifier: i
+tests/nimony/errmsgs/ttypeofundeclared.nim(12, 18) Error: undeclared identifier: undeclaredName
+tests/nimony/errmsgs/ttypeofundeclared.nim(13, 17) Error: undeclared identifier: undeclaredName
