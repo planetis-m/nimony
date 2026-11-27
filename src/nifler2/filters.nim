@@ -228,7 +228,7 @@ proc at(p: TmplParser; i: int): char {.inline.} =
 proc spacesN(n: int): string {.inline.} = spaces(max(n, 0))
 
 proc newLine(p: var TmplParser) =
-  p.outp.add repeat(')', p.emitPar)
+  p.outp.add repeat(')', max(p.emitPar, 0))
   p.emitPar = 0
   if p.line > 1: p.outp.add "\n"
   if p.pendingExprLine:

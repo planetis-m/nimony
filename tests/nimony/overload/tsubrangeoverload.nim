@@ -1,7 +1,7 @@
 # A subrange argument against its base type, or a base-type argument against a
 # subrange, is a subrange match: it ranks below a generic match
 # (doc/language.md, "Some Examples": `takesInt(z) # "T"`).
-import std/syncio
+import std/[syncio, strutils, sequtils]
 
 proc p(x: int): string = "int"
 proc p[T](x: T): string = "T"
@@ -18,3 +18,4 @@ var c: range['a'..'z'] = 'a'
 var i = 1
 echo p(z), " ", p(nat), " ", ch(c), " ", v(nat), " ", v(i)
 echo g(nat, 1), " ", g(nat, i), " ", g(i, nat)
+echo repeat('y', nat), " ", repeat("ab", nat)  # strutils, not sequtils' `repeat[T]`

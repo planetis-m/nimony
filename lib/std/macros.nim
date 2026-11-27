@@ -368,7 +368,7 @@ proc treeRepr*(n: NimNode): string =
   proc aux(n: NimNode; indent: int): string =
     if isNilNode(n):
       return "nil"
-    let prefix = repeat("  ", indent)
+    let prefix = repeat("  ", max(indent, 0))
     result = prefix & $n.kind
     case n.kind
     of nnkIdent, nnkSym:
