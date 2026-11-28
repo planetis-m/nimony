@@ -122,12 +122,12 @@ func center*(s: string; width: int; fillChar: char = ' '): string =
     result.add s
     for i in leftPadding + s.len ..< width: result.add fillChar
 
-func repeat*(c: char; n: int): string =
+func repeat*(c: char; n: Natural): string =
   ## Returns a string made of `c` repeated `n` times.
   result = newString(n)
   for i in 0 ..< result.len: result[i] = c
 
-func repeat*(s: string; n: int): string =
+func repeat*(s: string; n: Natural): string =
   ## Returns `s` repeated `n` times.
   result = ""
   for i in 0 ..< n: result.add s

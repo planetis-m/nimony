@@ -158,7 +158,7 @@ proc addTok(g: var SrcGen, kind: TokType, s: string; sym: SymId = SymId(0);
 proc addPendingNL(g: var SrcGen) =
   if g.pendingNL >= 0:
     when defined(nimpretty):
-      let newlines = repeat("\n", clamp(g.pendingNewlineCount, 1, 3))
+      let newlines = repeat("\n", max(min(g.pendingNewlineCount, 3), 1))
     else:
       const newlines = "\n"
     addTok(g, tkSpaces, newlines & spaces(g.pendingNL))

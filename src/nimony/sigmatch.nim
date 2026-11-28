@@ -88,6 +88,7 @@ type
                             ## specificity ("concrete beats typevar") is decided
                             ## structurally from the two signatures
     hasError: bool # mark that error message was set
+    rangeAsBase: bool ## a constraint leaf also tries a subrange's base type
     skippedMod: TypeKind
     argInfo: NifLineInfo
     procArg: Cursor ## the argument `procTypeMatch` is matching, if its type is
@@ -519,11 +520,18 @@ proc matchTypeConstraint(m: var Match; f: var Cursor; a: Cursor): bool =
     result = tryLinearMatch(m, f, a2, ConstraintMatchFlags) or
       matchInheritedConstraint(m, fOrig, a)
 
-proc matchSingleConstraint(m: var Match; f: var Cursor; a: Cursor): bool {.inline.} =
+proc matchSingleConstraint(m: var Match; f: var Cursor; a: Cursor): bool =
+  let f0 = f
   if f.isSymbol:
     result = matchSymbolConstraint(m, f, a)
   else:
     result = matchTypeConstraint(m, f, a)
+  if not result and m.rangeAsBase and a.typeKind == RangetypeT:
+    # `range[T]` satisfies what `T` satisfies
+    f = f0
+    var base = a
+    inc base
+    result = matchSingleConstraint(m, f, base)
 
 proc matchConstraintSplitAnd(m: var Match; f: var Cursor; a: Cursor): bool =
   if a.typeKind == AndT:
@@ -639,7 +647,17 @@ proc matchesConstraint*(m: var Match; f: var Cursor; a: Cursor): bool =
       # for a value parameter its element type stands in for its "type"
       var typevar = asTypevar(res.decl)
       return matchesConstraint(m, f, typevar.typ)
+  let f0 = f
   result = matchesConstraintAux(m, f, a)
+  if a.typeKind == RangetypeT and not m.rangeAsBase:
+    # a subrange satisfies a constraint when its base type does; when only
+    # the base type does, it is a subrange match (category 4)
+    f = f0
+    m.rangeAsBase = true
+    let viaBase = matchesConstraintAux(m, f, a)
+    m.rangeAsBase = false
+    if viaBase and not result: inc m.inheritanceCosts
+    result = viaBase
 
 proc foldValueExpr(m: var Match; a: Cursor; depth = 0): xint =
   ## The tiny fixed-opcode evaluator for compile-time *values* in type
@@ -2002,7 +2020,8 @@ proc skipExpr*(n: Cursor): Cursor =
 proc matchIntegralType(m: var Match; f: var Cursor; arg: CallArg) =
   var a = skipModifier(arg.typ)
   if a.typeKind == RangetypeT:
-    inc a # skip to base type
+    inc a # subrange match: `range[T]` matches when `T` matches exactly
+    inc m.inheritanceCosts
   let ex = skipExpr(arg.n)
   let isIntLit = f.typeKind != CharT and
     ex.isIntLit and sameTrees(a, m.context.types.intType)
@@ -2406,12 +2425,13 @@ proc singleArgOnFormal(m: var Match; f: var Cursor; arg: CallArg) =
         if f.typeKind in {IntT, UIntT, FloatT} and not sameTrees(f, a) and
             skipExpr(arg.n).kind in {IntLit, FloatLit}:
           # a literal fits the base type as it fits that type itself:
-          # `5` for `range[0'i8 .. 100'i8]`. The cost keeps `p(5)` picking
-          # `p(x: int8)` over `p(x: range[0'i8 .. 100'i8])`.
+          # `5` for `range[0'i8 .. 100'i8]`.
           matchIntegralType m, f, arg # consumes the base type
-          inc m.inheritanceCosts
         else:
           linearMatch m, f, a
+        # narrowing to the range costs what widening from a range costs: it
+        # keeps `p(5)` picking `p(x: int8)` over `p(x: range[0'i8 .. 100'i8])`
+        inc m.inheritanceCosts
         skip f # lo bound
         skip f # hi bound
         expectParRi m, f, fStart
